@@ -6,7 +6,9 @@ from sqlalchemy import create_engine
 from config import DATABASE_URL
 from explain import explain_safe
 from inspector import get_all_tables, get_table_detail
+from index_suggest import suggest_indexes
 from safety import execute_safe
+from schema_health import validate_schema as validate_schema_data
 
 
 mcp = FastMCP("db-explorer")
@@ -45,6 +47,21 @@ def execute_query(sql: str, row_limit: int = 100) -> dict[str, Any]:
 def explain_query(sql: str) -> dict[str, Any]:
     """Return the database execution plan for one safe SELECT query."""
     return explain_safe(engine, sql)
+
+
+@mcp.tool
+def validate_schema(table_name: str | None = None) -> dict[str, Any]:
+    """Check tables for missing primary keys and unindexed foreign keys."""
+    return validate_schema_data(engine, table_name)
+
+
+@mcp.tool
+def suggest_index(
+    query: str | None = None,
+    table_name: str | None = None,
+) -> dict[str, Any]:
+    """Suggest indexes from a query plan or table foreign-key metadata."""
+    return suggest_indexes(engine, query, table_name)
 
 
 if __name__ == "__main__":
