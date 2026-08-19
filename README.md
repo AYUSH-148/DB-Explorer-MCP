@@ -15,6 +15,82 @@ The server makes no LLM API calls of its own, so there is **no API key to config
 
 Giving an assistant raw database credentials means one confused or prompt-injected turn can drop a table. Handing it a read-only replica loses schema context and plan analysis. This server takes the middle path: full introspection and query power, with mutation made structurally impossible at the parser level rather than by asking the model to behave.
 
+## Architecture
+
+```text
+┌──────────────────────────────────────────────────────────────┐
+│  MCP client  (Claude Code / Claude Desktop / Inspector)      │
+│  owns the LLM: reads schema, authors SQL, interprets results │
+└───────────────────────────┬──────────────────────────────────┘
+                            │  MCP  ·  stdio (local)
+                            │        ·  streamable HTTP + OAuth 2.0 (remote)
+┌───────────────────────────▼──────────────────────────────────┐
+│ server.py  —  FastMCP instance + one shared SQLAlchemy engine│
+│                                                              │
+│   explore_schema   execute_query    explain_query            │
+│   validate_schema  suggest_index    migration_context        │
+│   validate_migration                                         │
+└──────┬───────────────────────┬───────────────────┬───────────┘
+       │                       │                   │
+       │  read path            │  metadata path    │  review path
+       │                       │                   │
+┌──────▼────────────┐  ┌───────▼─────────┐  ┌──────▼──────────┐
+│ safety.py         │  │ inspector.py    │  │ migration.py    │
+│ ── trust boundary │  │ schema_health.py│  │ parses up/down, │
+│ sqlparse AST      │  │ index_suggest.py│  │ never executes  │
+│ SELECT-only       │  │ explain.py      │  │                 │
+│ 1 stmt · no cmnts │  │                 │  │                 │
+│ denylist · LIMIT  │  │                 │  │                 │
+└──────┬────────────┘  └───────┬─────────┘  └─────────────────┘
+       │                       │
+       └───────────┬───────────┘
+                   │  SQLAlchemy Core (text() + inspect())
+┌──────────────────▼───────────────────────────────────────────┐
+│  Target database   ·   PostgreSQL  /  MySQL  /  SQLite       │
+└──────────────────────────────────────────────────────────────┘
+```
+
+**The LLM lives in the client, not the server.** Most NL-to-SQL designs put a model call inside the server; this one does not. The client already has a capable model, so the server ships zero LLM dependencies, zero API keys, and zero per-call inference cost — and stays usable from any MCP client, not just Claude.
+
+That split defines the trust boundary: the SQL arriving at [safety.py](safety.py) is model-authored and therefore untrusted, so it is parsed rather than pattern-matched, and a rejected query never reaches the driver.
+
+### Request lifecycle
+
+A typical `execute_query` call:
+
+1. **Client** turns the user's question into SQL, using schema it fetched earlier via `explore_schema`.
+2. **FastMCP** deserializes the tool call and validates arguments against the tool's type hints.
+3. **safety.py** parses the SQL with `sqlparse` — one statement, type `SELECT`, no comments, no blocked keywords. Failure raises before any connection is opened.
+4. **Row cap** applied: if the query has no `LIMIT`, it is wrapped in `SELECT * FROM (…) AS limited_query LIMIT row_limit`.
+5. **SQLAlchemy** executes it on a pooled connection and the rows are serialized to plain dicts.
+6. **Client** receives `{columns, rows, count}` as structured JSON and explains it in natural language.
+
+Errors travel the same path in reverse: a raised `ValueError` becomes an MCP tool error, which the client surfaces to the user while the server keeps serving.
+
+### Module responsibilities
+
+| Module | Role |
+| --- | --- |
+| [server.py](server.py) | Tool surface only — thin `@mcp.tool` wrappers over plain functions, plus transport selection |
+| [safety.py](safety.py) | The trust boundary: AST validation and row-limited execution |
+| [inspector.py](inspector.py) | Reflection via SQLAlchemy `inspect()` — columns, PK, FKs, indexes, row counts, samples |
+| [explain.py](explain.py) | Dialect-aware plans (`EXPLAIN QUERY PLAN` on SQLite, `EXPLAIN` elsewhere) |
+| [index_suggest.py](index_suggest.py) | Recommendations from a live plan or from FK metadata |
+| [schema_health.py](schema_health.py) | Objective schema audit, no heuristics about naming or style |
+| [migration.py](migration.py) | Schema context out, script validation in — never executes DDL |
+| [config.py](config.py) | Environment resolution with fail-fast checks |
+
+Each tool body delegates to a module-level function that takes an `Engine` argument, so the whole system is testable against a temporary SQLite database with no MCP client and no network involved.
+
+### Transports
+
+| Mode | Transport | Auth | Use |
+| --- | --- | --- | --- |
+| Local | stdio | process-level | development; client spawns the server |
+| Remote | streamable HTTP | OAuth 2.0 (DCR + PKCE) at the platform edge | shared deployment; many clients, one database |
+
+Both modes run identical tool code — only `MCP_TRANSPORT` changes.
+
 ## Tools
 
 | Tool | Arguments | Returns |
