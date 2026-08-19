@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Local environments
+.venv/
+.env
+.env.*
+!.env.example
+
+# Local tooling
+.claude/
+.vscode/*.local.json
+
+# Generated local database
+*.db
+*.sqlite
+*.sqlite3
+
+# Planning notes
+/db-explorer-mcp-blueprint.md
