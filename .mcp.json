@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "db-explorer": {
+      "type": "http",
+      "url": "https://db-explorer-mcp.fastmcp.app/mcp"
+    }
+  }
+}
