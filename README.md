@@ -81,3 +81,7 @@ uv run pytest
 ```
 
 The test suite uses temporary SQLite databases and does not require external credentials or a running database server.
+
+## Remote deployment
+
+See [DEPLOYMENT.md](DEPLOYMENT.md) for the FastMCP Horizon deployment steps, remote database requirements, and authentication checklist.
