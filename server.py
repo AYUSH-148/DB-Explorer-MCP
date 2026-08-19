@@ -3,7 +3,7 @@ from typing import Any
 from fastmcp import FastMCP
 from sqlalchemy import create_engine
 
-from config import DATABASE_URL
+from config import DATABASE_URL, MCP_HOST, MCP_PORT, MCP_TRANSPORT
 from explain import explain_safe
 from inspector import get_all_tables, get_table_detail
 from index_suggest import suggest_indexes
@@ -64,5 +64,18 @@ def suggest_index(
     return suggest_indexes(engine, query, table_name)
 
 
+def run_server() -> None:
+    if MCP_TRANSPORT == "stdio":
+        mcp.run(transport="stdio")
+        return
+    if MCP_TRANSPORT not in {"streamable-http", "sse"}:
+        raise ValueError("MCP_TRANSPORT must be stdio, streamable-http, or sse")
+    mcp.run(
+        transport=MCP_TRANSPORT,
+        host=MCP_HOST,
+        port=MCP_PORT,
+    )
+
+
 if __name__ == "__main__":
-    mcp.run()
+    run_server()

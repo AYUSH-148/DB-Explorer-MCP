@@ -50,3 +50,20 @@ def test_explain_query_tool_returns_plan(configured_engine, monkeypatch):
 
     assert result["dialect"] == "sqlite"
     assert result["plan"]
+
+
+def test_run_server_uses_stdio_by_default(monkeypatch):
+    calls = []
+    monkeypatch.setattr(server, "MCP_TRANSPORT", "stdio")
+    monkeypatch.setattr(server.mcp, "run", lambda **kwargs: calls.append(kwargs))
+
+    server.run_server()
+
+    assert calls == [{"transport": "stdio"}]
+
+
+def test_run_server_rejects_unknown_transport(monkeypatch):
+    monkeypatch.setattr(server, "MCP_TRANSPORT", "invalid")
+
+    with pytest.raises(ValueError, match="MCP_TRANSPORT"):
+        server.run_server()
