@@ -1,0 +1,9 @@
+{
+  "servers": {
+    "db-explorer": {
+      "type": "stdio",
+      "command": "py",
+      "args": ["-m", "uv", "run", "server.py"]
+    }
+  }
+}

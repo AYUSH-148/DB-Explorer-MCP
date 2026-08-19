@@ -29,3 +29,24 @@ def test_explore_schema_tool_returns_table_detail(configured_engine, monkeypatch
 
     assert result["name"] == "users"
     assert result["sample_rows"][0]["email"] == "alice@example.com"
+
+
+def test_execute_query_tool_returns_rows(configured_engine, monkeypatch):
+    monkeypatch.setattr(server, "engine", configured_engine)
+
+    result = server.execute_query_data("SELECT name FROM users")
+
+    assert result == {
+        "columns": ["name"],
+        "rows": [{"name": "Alice"}],
+        "count": 1,
+    }
+
+
+def test_explain_query_tool_returns_plan(configured_engine, monkeypatch):
+    monkeypatch.setattr(server, "engine", configured_engine)
+
+    result = server.explain_query("SELECT name FROM users")
+
+    assert result["dialect"] == "sqlite"
+    assert result["plan"]
