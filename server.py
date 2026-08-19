@@ -7,6 +7,7 @@ from config import DATABASE_URL, MCP_HOST, MCP_PORT, MCP_TRANSPORT
 from explain import explain_safe
 from inspector import get_all_tables, get_table_detail
 from index_suggest import suggest_indexes
+from migration import get_migration_context, validate_migration as validate_migration_data
 from safety import execute_safe
 from schema_health import validate_schema as validate_schema_data
 
@@ -62,6 +63,18 @@ def suggest_index(
 ) -> dict[str, Any]:
     """Suggest indexes from a query plan or table foreign-key metadata."""
     return suggest_indexes(engine, query, table_name)
+
+
+@mcp.tool
+def migration_context() -> dict[str, Any]:
+    """Return schema context for client-side migration generation."""
+    return get_migration_context(engine)
+
+
+@mcp.tool
+def validate_migration(up_sql: str, down_sql: str) -> dict[str, Any]:
+    """Validate migration scripts without executing them."""
+    return validate_migration_data(engine, up_sql, down_sql)
 
 
 def run_server() -> None:

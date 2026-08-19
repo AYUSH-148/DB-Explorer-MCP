@@ -69,6 +69,8 @@ The remote deployment must provide authentication and protect `DATABASE_URL` thr
 - `explain_query`: return the native execution plan
 - `validate_schema`: report missing primary keys and unindexed foreign keys
 - `suggest_index`: suggest indexes from table metadata or a query plan
+- `migration_context`: provide schema context for client-side migration generation
+- `validate_migration`: validate proposed `UP` and `DOWN` scripts without executing them
 
 Every query execution and explanation passes through the safety layer. Mutating statements, comments, and multiple statements are rejected. Query results default to a maximum of 100 rows.
 
