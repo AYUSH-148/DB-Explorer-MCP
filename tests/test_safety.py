@@ -1,7 +1,7 @@
 from pathlib import Path
 
 import pytest
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, text
 
 from safety import execute_safe, validate_query
 from tests.seed_test_db import create_sample_database
@@ -69,3 +69,48 @@ def test_execute_safe_rejects_unsafe_query(tmp_path: Path):
 
     with pytest.raises(ValueError, match="Unsafe query blocked"):
         execute_safe(engine, "DROP TABLE users")
+
+
+def test_string_literals_containing_dashes_are_allowed():
+    assert validate_query("SELECT '--sale' AS label FROM users") == (
+        True,
+        "Query is safe",
+    )
+
+
+def test_block_comments_are_blocked():
+    is_safe, reason = validate_query("SELECT /* hidden */ * FROM users")
+
+    assert not is_safe
+    assert reason == "SQL comments are not allowed"
+
+
+def test_union_select_is_allowed():
+    """UNION stays permitted: it is read-only, and this server exposes every
+    table through explore_schema anyway, so it reaches nothing a plain SELECT
+    could not. See issue #1."""
+    assert validate_query("SELECT name FROM users UNION SELECT email FROM users") == (
+        True,
+        "Query is safe",
+    )
+
+
+def test_subquery_limit_does_not_bypass_row_limit(tmp_path: Path):
+    database_path = tmp_path / "sample.db"
+    create_sample_database(database_path)
+    engine = create_engine(f"sqlite:///{database_path}")
+    with engine.begin() as connection:
+        for index in range(2, 7):
+            connection.execute(
+                text("INSERT INTO users (name, email) VALUES (:name, :email)"),
+                {"name": f"User{index}", "email": f"user{index}@example.com"},
+            )
+
+    # The LIMIT belongs to the subquery, so the outer row cap must still apply.
+    result = execute_safe(
+        engine,
+        "SELECT * FROM users WHERE id IN (SELECT id FROM users LIMIT 5)",
+        row_limit=2,
+    )
+
+    assert result["count"] == 2

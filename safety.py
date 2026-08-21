@@ -1,9 +1,8 @@
-import re
 from typing import Any
 
 from sqlalchemy import Engine, text
 from sqlparse import parse
-from sqlparse.tokens import DDL, DML, Keyword
+from sqlparse.tokens import Comment, DDL, DML, Keyword
 
 
 BLOCKED_KEYWORDS = {
@@ -27,8 +26,6 @@ def validate_query(sql: str) -> tuple[bool, str]:
     """Return whether SQL contains exactly one safe read-only statement."""
     if not isinstance(sql, str) or not sql.strip():
         return False, "SQL query is required"
-    if "--" in sql or "/*" in sql or "*/" in sql:
-        return False, "SQL comments are not allowed"
 
     statements = [statement for statement in parse(sql) if statement.tokens]
     if len(statements) != 1:
@@ -39,17 +36,17 @@ def validate_query(sql: str) -> tuple[bool, str]:
         statement_type = statement.get_type() or "UNKNOWN"
         return False, f"Only SELECT queries are allowed. Got: {statement_type}"
 
+    # Comments are detected on parsed tokens rather than as raw substrings so that
+    # a string literal containing "--" is not mistaken for a comment.
     for token in statement.flatten():
+        if token.ttype in Comment:
+            return False, "SQL comments are not allowed"
         if token.ttype in (DML, DDL, Keyword):
             keyword = token.value.upper()
             if keyword in BLOCKED_KEYWORDS:
                 return False, f"Blocked keyword detected: {keyword}"
 
     return True, "Query is safe"
-
-
-def _has_limit(sql: str) -> bool:
-    return bool(re.search(r"\bLIMIT\b", sql, re.IGNORECASE))
 
 
 def execute_safe(
@@ -65,16 +62,18 @@ def execute_safe(
     if not is_safe:
         raise ValueError(f"Unsafe query blocked: {reason}")
 
-    query = sql.strip().rstrip(";")
-    if not _has_limit(query):
-        query = f"SELECT * FROM ({query}) AS limited_query LIMIT {row_limit}"
+    # The query is always wrapped. Looking for a LIMIT in the text instead would
+    # accept one belonging to a subquery and leave the result set unbounded.
+    inner_query = sql.strip().rstrip(";")
+    query = f"SELECT * FROM ({inner_query}) AS limited_query LIMIT {row_limit}"
 
     with engine.connect() as connection:
         result = connection.execute(text(query))
         rows = [dict(row) for row in result.mappings()]
+        columns = list(result.keys())
 
     return {
-        "columns": list(result.keys()),
+        "columns": columns,
         "rows": rows,
         "count": len(rows),
     }

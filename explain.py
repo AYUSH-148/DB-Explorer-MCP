@@ -18,10 +18,11 @@ def explain_safe(engine: Engine, sql: str) -> dict[str, Any]:
     with engine.connect() as connection:
         result = connection.execute(text(explain_sql))
         rows = [dict(row) for row in result.mappings()]
+        columns = list(result.keys())
 
     return {
         "query": query,
         "dialect": engine.dialect.name,
-        "columns": list(result.keys()),
+        "columns": columns,
         "plan": rows,
     }
