@@ -2,7 +2,9 @@ from typing import Any
 
 from sqlalchemy import Engine, text
 
+from db import read_only_connection
 from safety import validate_query
+from serialization import jsonable_rows
 
 
 def explain_safe(engine: Engine, sql: str) -> dict[str, Any]:
@@ -15,9 +17,9 @@ def explain_safe(engine: Engine, sql: str) -> dict[str, Any]:
     prefix = "EXPLAIN QUERY PLAN" if engine.dialect.name == "sqlite" else "EXPLAIN"
     explain_sql = f"{prefix} {query}"
 
-    with engine.connect() as connection:
+    with read_only_connection(engine) as connection:
         result = connection.execute(text(explain_sql))
-        rows = [dict(row) for row in result.mappings()]
+        rows = jsonable_rows(result.mappings())
         columns = list(result.keys())
 
     return {
