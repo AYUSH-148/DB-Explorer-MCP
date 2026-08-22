@@ -117,7 +117,13 @@ Every `execute_query`, `explain_query`, and `suggest_index` call routes through 
 - **No SQL comments.** `--`, `/*`, `*/` are refused outright, closing the classic comment-smuggling route
 - **No blocked keywords** anywhere in the token stream: `ALTER`, `CREATE`, `DELETE`, `DROP`, `EXEC`, `EXECUTE`, `GRANT`, `INSERT`, `INTO`, `REVOKE`, `SET`, `TRUNCATE`, `UPDATE`
 
-Queries that pass and contain no `LIMIT` are wrapped as `SELECT * FROM (<your query>) AS limited_query LIMIT <row_limit>`, so an unbounded scan cannot flood the client's context. A `LIMIT` you write yourself is respected as-is.
+Every query that passes is wrapped as `SELECT * FROM (<your query>) AS limited_query LIMIT <row_limit>`, so an unbounded scan cannot flood the client's context. The wrap is unconditional: a `LIMIT` in your own query narrows the inner result, but `row_limit` still caps what comes back, so `LIMIT 500` with the default `row_limit` returns 100 rows.
+
+Validation is only the first of three layers, because a keyword blocklist cannot see a query that is syntactically fine and still harmful:
+
+- **A statement timeout.** `SELECT pg_sleep(600)` passes every check above, so time is bounded independently of syntax: `statement_timeout` on PostgreSQL, `max_execution_time` on MySQL, and a progress-handler deadline on SQLite. Configured by `QUERY_TIMEOUT_SECONDS`, applied in [db.py](db.py).
+- **A read-only transaction.** Reads run through `BEGIN READ ONLY` on PostgreSQL, `SET SESSION TRANSACTION READ ONLY` on MySQL, and `PRAGMA query_only` on SQLite. The database refuses the write itself, which is a guarantee the blocklist cannot make.
+- **Privileges.** Still the outermost boundary — see [.env.example](.env.example). A `SELECT`-only user is what stops server-side file reads like `pg_read_file()` that no keyword check reliably catches.
 
 `validate_migration` is deliberately the inverse: it rejects `SELECT` statements, and it never runs either script. You get the parsed statement types back and run the DDL yourself.
 
@@ -237,10 +243,13 @@ To watch the guardrails work, ask it to run `DELETE FROM users`. The call fails 
 | `MCP_TRANSPORT` | `stdio` | `stdio`, `streamable-http`, or `sse` |
 | `MCP_HOST` | `127.0.0.1` | HTTP transports only |
 | `MCP_PORT` | `8000` | HTTP transports only |
+| `QUERY_TIMEOUT_SECONDS` | `15` | Upper bound on any single statement; must be a positive integer |
+| `MCP_AUTH_TOKEN` | — | **Required** when `MCP_TRANSPORT` is not `stdio`. Minimum 32 characters |
+| `MCP_ALLOW_UNAUTHENTICATED` | `false` | Explicit opt-out of the token requirement, for trusted networks only |
 
 The sqlite fallback exists for local development only. [config.py](config.py) raises `RuntimeError: DATABASE_URL must be set when serving over HTTP` rather than silently serving an empty local file from a deployment — a failure mode that otherwise surfaces much later as a confusing `unable to open database file`.
 
-Nothing in this project reads `.env` files; `.env.example` is documentation. Supply real values through your shell or your host's secret store, and keep credentials out of the repo.
+`.env` is loaded at startup by [config.py](config.py), so copying `.env.example` to `.env` works as that file instructs. The file next to `config.py` is read first and a `.env` in the working directory second, because an MCP client launches this server with a working directory you do not control. Real environment variables always win over both, so a host's secret store overrides the file without editing it. `.env` stays gitignored.
 
 ## Serve over HTTP
 
@@ -249,10 +258,13 @@ $env:MCP_TRANSPORT = "streamable-http"
 $env:MCP_HOST = "0.0.0.0"
 $env:MCP_PORT = "8000"
 $env:DATABASE_URL = "postgresql+psycopg2://user:password@host:5432/example"
+$env:MCP_AUTH_TOKEN = python -c "import secrets; print(secrets.token_urlsafe(32))"
 uv run server.py
 ```
 
-Never expose this endpoint without authentication — read-only still means readable, and every row is reachable. See [DEPLOYMENT.md](DEPLOYMENT.md) for FastMCP Cloud / Prefect Horizon deployment, where OAuth 2.0 with dynamic client registration and PKCE is handled by the platform.
+An HTTP endpoint publishes SELECT on the configured database to anyone who can reach the port, so the server **fails to start** without `MCP_AUTH_TOKEN` rather than coming up unprotected. Clients send it as `Authorization: Bearer <token>`; it is compared in constant time in [auth.py](auth.py). Set `MCP_ALLOW_UNAUTHENTICATED=true` to override on a genuinely trusted network — the server then warns on stderr at every startup.
+
+For real user identity rather than one shared secret, swap `SharedSecretVerifier` for one of FastMCP's OAuth providers. See [DEPLOYMENT.md](DEPLOYMENT.md) for FastMCP Cloud / Prefect Horizon deployment, where OAuth 2.0 with dynamic client registration and PKCE is handled by the platform.
 
 **Hosted Supabase note:** direct connections (`db.<ref>.supabase.co`) are IPv6-only, which fails from IPv4-only containers with an empty-looking `psycopg2.OperationalError`. Use the pooler host from the dashboard's *Connect* panel, and note that the username becomes `postgres.<project-ref>`.
 
@@ -262,13 +274,18 @@ Never expose this endpoint without authentication — read-only still means read
 uv run pytest
 ```
 
-32 tests covering the safety layer, inspector, explain, index suggestions, schema health, migration validation, and the tool wrappers. Each uses a temporary SQLite database, so the suite needs no credentials and no running server.
+80 tests covering the safety layer, value serialization, read-only enforcement and timeouts, HTTP authentication, inspector, explain, index suggestions, schema health, migration validation, and the tool wrappers. Each uses a temporary SQLite database, so the suite needs no credentials and no running server.
+
+SQLite cannot produce the types that break a real driver -- it has no `NUMERIC` and returns `str`/`int` for nearly everything -- so [tests/test_serialization.py](tests/test_serialization.py) exercises `Decimal`, `datetime`, `UUID`, and binary values directly rather than through a query. A PostgreSQL and MySQL test path is the next gap worth closing.
 
 ## Project layout
 
 ```text
 server.py         FastMCP instance, engine, and the 7 tool definitions
 safety.py         query validation and row-limited execution
+db.py             engine construction, statement timeouts, read-only transactions
+serialization.py  driver values to JSON-safe primitives
+auth.py           bearer-token verification for HTTP transports
 inspector.py      schema reflection (columns, PK, FKs, indexes, samples)
 explain.py        dialect-aware EXPLAIN
 index_suggest.py  index recommendations from plans or FK metadata
@@ -283,4 +300,6 @@ tests/            pytest suite over temporary SQLite databases
 - **Migrations are never executed.** The server returns schema context and validates scripts; you run the DDL. That keeps the connection read-only in practice, not just by policy.
 - **Query-mode `suggest_index` is tuned to SQLite plan output**, which exposes a `detail` column containing `SCAN`. On PostgreSQL and MySQL the plan is still returned in full, but automatic recommendations will usually be empty — use `table_name` mode there, which works from foreign-key metadata on every dialect.
 - **`SET` and `INTO` are blocked keywords**, so a few legitimate `SELECT`s (for example `GROUPING SETS`) are rejected. Deliberate trade: a false rejection is cheap, a false acceptance is not.
-- **The row cap is a context guard, not a performance guard.** A heavy aggregate still runs in full on the database before its output is limited.
+- **The row cap is a context guard, not a performance guard.** A heavy aggregate still runs in full on the database before its output is limited. `QUERY_TIMEOUT_SECONDS` is what bounds the cost of that work.
+- **Binary columns are summarised, not returned.** Values up to 256 bytes arrive hex-encoded, which suits `BINARY(16)` UUIDs and digests; anything larger is reported as a size only. Inlining a multi-megabyte blob would consume the context window it was sent to.
+- **Wide `NUMERIC` values arrive as strings.** A decimal that fits a float is a JSON number so it sorts and compares correctly; one that does not keeps its exact digits rather than being silently rounded.

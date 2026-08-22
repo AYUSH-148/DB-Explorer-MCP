@@ -1,9 +1,17 @@
 from typing import Any
 
 from fastmcp import FastMCP
-from sqlalchemy import create_engine
 
-from config import DATABASE_URL, MCP_HOST, MCP_PORT, MCP_TRANSPORT
+from auth import build_auth_provider
+from config import (
+    DATABASE_URL,
+    MCP_ALLOW_UNAUTHENTICATED,
+    MCP_AUTH_TOKEN,
+    MCP_HOST,
+    MCP_PORT,
+    MCP_TRANSPORT,
+)
+from db import create_configured_engine
 from explain import explain_safe
 from inspector import get_all_tables, get_table_detail
 from index_suggest import suggest_indexes
@@ -12,8 +20,13 @@ from safety import execute_safe
 from schema_health import validate_schema as validate_schema_data
 
 
-mcp = FastMCP("db-explorer")
-engine = create_engine(DATABASE_URL)
+mcp = FastMCP(
+    "db-explorer",
+    auth=build_auth_provider(
+        MCP_TRANSPORT, MCP_AUTH_TOKEN, MCP_ALLOW_UNAUTHENTICATED
+    ),
+)
+engine = create_configured_engine(DATABASE_URL)
 
 
 def explore_schema_data(

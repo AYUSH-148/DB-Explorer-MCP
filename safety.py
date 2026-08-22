@@ -3,6 +3,8 @@ from typing import Any
 from sqlalchemy import Engine, text
 from sqlparse import parse
 from sqlparse.tokens import Comment, DDL, DML, Keyword
+from db import read_only_connection
+from serialization import jsonable_rows
 
 
 BLOCKED_KEYWORDS = {
@@ -67,9 +69,9 @@ def execute_safe(
     inner_query = sql.strip().rstrip(";")
     query = f"SELECT * FROM ({inner_query}) AS limited_query LIMIT {row_limit}"
 
-    with engine.connect() as connection:
+    with read_only_connection(engine) as connection:
         result = connection.execute(text(query))
-        rows = [dict(row) for row in result.mappings()]
+        rows = jsonable_rows(result.mappings())
         columns = list(result.keys())
 
     return {

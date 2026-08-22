@@ -2,13 +2,16 @@ from typing import Any
 
 from sqlalchemy import Engine, inspect, text
 
+from db import read_only_connection
+from serialization import jsonable, jsonable_rows
+
 
 def _column_info(column: dict[str, Any]) -> dict[str, Any]:
     return {
         "name": column["name"],
         "type": str(column["type"]),
         "nullable": column["nullable"],
-        "default": column.get("default"),
+        "default": jsonable(column.get("default")),
     }
 
 
@@ -18,7 +21,7 @@ def _table_info(engine: Engine, table_name: str) -> dict[str, Any]:
     foreign_keys = database_inspector.get_foreign_keys(table_name)
     indexes = database_inspector.get_indexes(table_name)
 
-    with engine.connect() as connection:
+    with read_only_connection(engine) as connection:
         row_count = connection.execute(
             text(f'SELECT COUNT(*) FROM "{table_name}"')
         ).scalar_one()
@@ -70,9 +73,9 @@ def get_table_detail(
 
     details = _table_info(engine, table_name)
     if include_sample_data:
-        with engine.connect() as connection:
+        with read_only_connection(engine) as connection:
             result = connection.execute(
                 text(f'SELECT * FROM "{table_name}" LIMIT 3')
             )
-            details["sample_rows"] = [dict(row) for row in result.mappings()]
+            details["sample_rows"] = jsonable_rows(result.mappings())
     return details
