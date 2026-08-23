@@ -81,6 +81,7 @@ Errors travel the same path in reverse: a raised `ValueError` becomes an MCP too
 | [index_suggest.py](index_suggest.py) | Recommendations from a live plan or from FK metadata |
 | [schema_health.py](schema_health.py) | Objective schema audit, no heuristics about naming or style |
 | [migration.py](migration.py) | Schema context out, script validation in — never executes DDL |
+| [errors.py](errors.py) | Coded, hinted errors and driver-error classification |
 | [config.py](config.py) | Environment resolution with fail-fast checks |
 
 Each tool body delegates to a module-level function that takes an `Engine` argument, so the whole system is testable against a temporary SQLite database with no MCP client and no network involved.
@@ -133,6 +134,35 @@ Validation is only the first of three layers, because a keyword blocklist cannot
 - **Privileges.** Still the outermost boundary — see [.env.example](.env.example). A `SELECT`-only user is what stops server-side file reads like `pg_read_file()` that no keyword check reliably catches.
 
 `validate_migration` is deliberately the inverse: it rejects `SELECT` statements, and it never runs either script. You get the parsed statement types back and run the DDL yourself.
+
+## Errors
+
+A tool error is only useful to a model if it says what to do next, so every failure carries a code and a corrective hint instead of a bare message:
+
+```text
+[table_not_found] Table not found: usrs. Did you mean: users.
+Hint: Call explore_schema() to list the tables in this database.
+
+[sql_error] The database rejected the query: no such column: totl.
+Hint: Call explore_schema(table_name=...) to confirm the table and column names before retrying.
+
+[query_timeout] The query exceeded the statement timeout of 15s: interrupted.
+Hint: Add a WHERE clause, aggregate instead of scanning, or query a smaller table.
+```
+
+| Code | Cause |
+| --- | --- |
+| `table_not_found` | No such table. Carries the nearest matching names the database does have |
+| `sql_error` | The database rejected the query — a missing column, a type mismatch, bad syntax |
+| `query_timeout` | The statement hit `QUERY_TIMEOUT_SECONDS` and was cancelled |
+| `unsafe_query` | Blocked by [safety.py](safety.py). The hint names the specific rule that fired |
+| `invalid_argument` | An argument out of range, such as `row_limit` below 1 |
+| `missing_argument` / `conflicting_arguments` | `suggest_index` needs exactly one of `query` or `table_name` |
+| `comments_not_allowed` / `unparsable_sql` / `select_in_migration` | `validate_migration` rejected a script |
+
+Two details worth knowing. Errors are raised as FastMCP `ToolError`, which is the only error type that survives a server configured with `mask_error_details=True` — reasonable hardening for an HTTP deployment, and it would otherwise reduce every message above to `Error calling tool`. And `sql_error` reports the query *you* sent, not the row-limit wrapper [safety.py](safety.py) builds around it, so the SQL in the message is SQL you can act on.
+
+Internally these stay Python exceptions. [errors.py](errors.py) defines `ToolInputError`, a `ValueError` subclass whose `str()` is the plain message, so composition between modules and direct Python use both keep working; conversion happens only at the tool boundary in [server.py](server.py).
 
 ## Quickstart
 
@@ -281,7 +311,7 @@ For real user identity rather than one shared secret, swap `SharedSecretVerifier
 uv run pytest
 ```
 
-80 tests covering the safety layer, value serialization, read-only enforcement and timeouts, HTTP authentication, inspector, explain, index suggestions, schema health, migration validation, and the tool wrappers. Each uses a temporary SQLite database, so the suite needs no credentials and no running server.
+111 tests covering the safety layer, value serialization, read-only enforcement and timeouts, HTTP authentication, inspector, explain, index suggestions, schema health, migration validation, error reporting, and the tool wrappers. Each uses a temporary SQLite database, so the suite needs no credentials and no running server.
 
 SQLite cannot produce the types that break a real driver -- it has no `NUMERIC` and returns `str`/`int` for nearly everything -- so [tests/test_serialization.py](tests/test_serialization.py) exercises `Decimal`, `datetime`, `UUID`, and binary values directly rather than through a query. A PostgreSQL and MySQL test path is the next gap worth closing.
 
@@ -298,6 +328,7 @@ explain.py        dialect-aware EXPLAIN
 index_suggest.py  index recommendations from plans or FK metadata
 schema_health.py  objective schema issue reporting
 migration.py      migration context and non-executing script validation
+errors.py         coded errors with hints, and driver-error classification
 config.py         environment configuration with fail-fast checks
 tests/            pytest suite over temporary SQLite databases
 ```

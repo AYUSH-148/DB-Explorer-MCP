@@ -1,6 +1,10 @@
-from typing import Any
+from collections.abc import Callable
+from functools import wraps
+from typing import Any, ParamSpec, TypeVar
 
 from fastmcp import FastMCP
+from fastmcp.exceptions import ToolError
+from sqlalchemy.exc import SQLAlchemyError
 
 from auth import build_auth_provider
 from config import (
@@ -11,7 +15,8 @@ from config import (
     MCP_PORT,
     MCP_TRANSPORT,
 )
-from db import create_configured_engine
+from db import create_configured_engine, engine_timeout_seconds
+from errors import ToolInputError, from_database_error
 from explain import explain_safe
 from inspector import DEFAULT_TABLE_LIMIT, get_schema_page, get_table_detail
 from index_suggest import suggest_indexes
@@ -27,6 +32,28 @@ mcp = FastMCP(
     ),
 )
 engine = create_configured_engine(DATABASE_URL)
+
+_Params = ParamSpec("_Params")
+_Result = TypeVar("_Result")
+
+
+def tool_errors(
+    function: Callable[_Params, _Result],
+) -> Callable[_Params, _Result]:
+    """Turn a failure into a tool error that says what the caller should do next.
+    """
+
+    @wraps(function)
+    def wrapper(*args: _Params.args, **kwargs: _Params.kwargs) -> _Result:
+        try:
+            return function(*args, **kwargs)
+        except ToolInputError as error:
+            raise ToolError(error.as_text()) from error
+        except SQLAlchemyError as error:
+            structured = from_database_error(error, engine_timeout_seconds(engine))
+            raise ToolError(structured.as_text()) from error
+
+    return wrapper
 
 
 def explore_schema_data(
@@ -49,6 +76,7 @@ def explore_schema_data(
 
 
 @mcp.tool
+@tool_errors
 def explore_schema(
     table_name: str | None = None,
     include_sample_data: bool = False,
@@ -73,24 +101,28 @@ def execute_query_data(sql: str, row_limit: int = 100) -> dict[str, Any]:
 
 
 @mcp.tool
+@tool_errors
 def execute_query(sql: str, row_limit: int = 100) -> dict[str, Any]:
     """Execute one validated, read-only SQL SELECT query."""
     return execute_query_data(sql, row_limit)
 
 
 @mcp.tool
+@tool_errors
 def explain_query(sql: str) -> dict[str, Any]:
     """Return the database execution plan for one safe SELECT query."""
     return explain_safe(engine, sql)
 
 
 @mcp.tool
+@tool_errors
 def validate_schema(table_name: str | None = None) -> dict[str, Any]:
     """Check tables for missing primary keys and unindexed foreign keys."""
     return validate_schema_data(engine, table_name)
 
 
 @mcp.tool
+@tool_errors
 def suggest_index(
     query: str | None = None,
     table_name: str | None = None,
@@ -100,12 +132,14 @@ def suggest_index(
 
 
 @mcp.tool
+@tool_errors
 def migration_context() -> dict[str, Any]:
     """Return schema context for client-side migration generation."""
     return get_migration_context(engine)
 
 
 @mcp.tool
+@tool_errors
 def validate_migration(up_sql: str, down_sql: str) -> dict[str, Any]:
     """Validate migration scripts without executing them."""
     return validate_migration_data(engine, up_sql, down_sql)

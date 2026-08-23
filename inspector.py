@@ -16,6 +16,7 @@ from sqlalchemy import Connection, Engine, inspect, text
 from sqlalchemy.engine.reflection import Inspector
 
 from db import read_only_connection
+from errors import ToolInputError, table_not_found
 from serialization import jsonable, jsonable_rows
 
 # A summary row is small, but a warehouse has thousands of tables. Bound the page so
@@ -69,10 +70,20 @@ def _select_names(
     """Return the page of table names a call should reflect."""
     if limit is not None:
         if limit < 1:
-            raise ValueError("limit must be at least 1")
+            raise ToolInputError(
+                code="invalid_argument",
+                message="limit must be at least 1",
+                hint=f"Pass a limit between 1 and {MAX_TABLE_LIMIT}, or omit it.",
+                received=limit,
+            )
         limit = min(limit, MAX_TABLE_LIMIT)
     if offset < 0:
-        raise ValueError("offset must not be negative")
+        raise ToolInputError(
+            code="invalid_argument",
+            message="offset must not be negative",
+            hint="Start at offset 0 and page forward with next_offset.",
+            received=offset,
+        )
 
     names = sorted(inspector.get_table_names())
     if name_pattern:
@@ -209,8 +220,9 @@ def get_table_detail(
     """Return details for one table, optionally including three sample rows."""
     with read_only_connection(engine) as connection:
         inspector = inspect(connection)
-        if table_name not in inspector.get_table_names():
-            raise ValueError(f"Table not found: {table_name}")
+        known_tables = inspector.get_table_names()
+        if table_name not in known_tables:
+            raise table_not_found(table_name, known_tables)
 
         reflected = _reflect(inspector, [table_name])[table_name]
         details = _table_payload(table_name, reflected)

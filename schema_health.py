@@ -2,6 +2,8 @@ from typing import Any
 
 from sqlalchemy import Engine, inspect
 
+from errors import table_not_found
+
 
 def _has_index_for_columns(
     indexes: list[dict[str, Any]],
@@ -21,7 +23,7 @@ def validate_schema(
     database_inspector = inspect(engine)
     tables = database_inspector.get_table_names()
     if table_name and table_name not in tables:
-        raise ValueError(f"Table not found: {table_name}")
+        raise table_not_found(table_name, tables)
 
     selected_tables = [table_name] if table_name else tables
     issues: list[dict[str, Any]] = []

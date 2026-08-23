@@ -2,6 +2,7 @@ from typing import Any
 
 from sqlalchemy import Engine, inspect
 
+from errors import ToolInputError, table_not_found
 from explain import explain_safe
 
 
@@ -22,15 +23,27 @@ def suggest_indexes(
 ) -> dict[str, Any]:
     """Suggest indexes from foreign-key metadata or a query execution plan."""
     if not query and not table_name:
-        raise ValueError("Provide a query or table_name")
+        raise ToolInputError(
+            code="missing_argument",
+            message="Provide a query or table_name",
+            hint=(
+                "Pass query=... to analyse one statement's plan, or "
+                "table_name=... to check a table's foreign keys."
+            ),
+        )
     if query and table_name:
-        raise ValueError("Provide query or table_name, not both")
+        raise ToolInputError(
+            code="conflicting_arguments",
+            message="Provide query or table_name, not both",
+            hint="Call the tool twice if you need both views.",
+        )
 
     recommendations: list[dict[str, Any]] = []
     if table_name:
         database_inspector = inspect(engine)
-        if table_name not in database_inspector.get_table_names():
-            raise ValueError(f"Table not found: {table_name}")
+        known_tables = database_inspector.get_table_names()
+        if table_name not in known_tables:
+            raise table_not_found(table_name, known_tables)
 
         indexes = database_inspector.get_indexes(table_name)
         for foreign_key in database_inspector.get_foreign_keys(table_name):

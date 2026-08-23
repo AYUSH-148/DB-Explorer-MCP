@@ -4,6 +4,7 @@ from sqlalchemy import Engine, text
 from sqlparse import parse
 from sqlparse.tokens import Comment, DDL, DML, Keyword
 from db import read_only_connection
+from errors import ToolInputError, unsafe_query
 from serialization import jsonable_rows
 
 
@@ -58,11 +59,16 @@ def execute_safe(
 ) -> dict[str, Any]:
     """Validate and execute a read-only query with a maximum row count."""
     if row_limit < 1:
-        raise ValueError("row_limit must be greater than zero")
+        raise ToolInputError(
+            code="invalid_argument",
+            message="row_limit must be greater than zero",
+            hint="Pass the number of rows you want back, at least 1.",
+            received=row_limit,
+        )
 
     is_safe, reason = validate_query(sql)
     if not is_safe:
-        raise ValueError(f"Unsafe query blocked: {reason}")
+        raise unsafe_query(reason)
 
     # The query is always wrapped. Looking for a LIMIT in the text instead would
     # accept one belonging to a subquery and leave the result set unbounded.

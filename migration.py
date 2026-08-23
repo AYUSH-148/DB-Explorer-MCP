@@ -3,6 +3,7 @@ from typing import Any
 from sqlalchemy import Engine
 from sqlparse import parse
 
+from errors import ToolInputError
 from inspector import get_all_tables
 
 
@@ -17,19 +18,35 @@ def get_migration_context(engine: Engine) -> dict[str, Any]:
 
 def _validate_script(script: str, name: str) -> list[str]:
     if not isinstance(script, str) or not script.strip():
-        raise ValueError(f"{name} SQL is required")
+        raise ToolInputError(
+            code="missing_argument",
+            message=f"{name} SQL is required",
+            hint="Both up_sql and down_sql must be non-empty.",
+        )
     if "--" in script or "/*" in script or "*/" in script:
-        raise ValueError(f"{name} SQL comments are not allowed")
+        raise ToolInputError(
+            code="comments_not_allowed",
+            message=f"{name} SQL comments are not allowed",
+            hint="Strip the comments from the migration script and resend it.",
+        )
 
     statements = [statement for statement in parse(script) if statement.tokens]
     if not statements:
-        raise ValueError(f"{name} SQL could not be parsed")
+        raise ToolInputError(
+            code="unparsable_sql",
+            message=f"{name} SQL could not be parsed",
+            hint="Send complete, semicolon-separated DDL statements.",
+        )
 
     statement_types = []
     for statement in statements:
         statement_type = statement.get_type() or "UNKNOWN"
         if statement_type == "SELECT":
-            raise ValueError(f"{name} SQL must not contain SELECT statements")
+            raise ToolInputError(
+                code="select_in_migration",
+                message=f"{name} SQL must not contain SELECT statements",
+                hint="Use execute_query to read data; migrations are DDL only.",
+            )
         statement_types.append(statement_type)
     return statement_types
 

@@ -1,9 +1,11 @@
 from pathlib import Path
 
 import pytest
+from fastmcp.exceptions import ToolError
 from sqlalchemy import create_engine
 
 import server
+from errors import ToolInputError
 from tests.seed_test_db import create_sample_database
 
 
@@ -98,3 +100,57 @@ def test_run_server_rejects_unknown_transport(monkeypatch):
 
     with pytest.raises(ValueError, match="MCP_TRANSPORT"):
         server.run_server()
+
+
+def test_a_caller_fixable_error_reaches_the_client_with_a_hint(
+    configured_engine, monkeypatch
+):
+    # ToolError rather than the original ValueError, because only ToolError
+    # survives a server configured with mask_error_details=True.
+    monkeypatch.setattr(server, "engine", configured_engine)
+
+    with pytest.raises(ToolError) as raised:
+        server.explore_schema(table_name="usrs")
+
+    message = str(raised.value)
+    assert "[table_not_found]" in message
+    assert "Did you mean: users" in message
+    assert "explore_schema()" in message
+
+
+def test_a_database_error_is_classified_at_the_boundary(
+    configured_engine, monkeypatch
+):
+    monkeypatch.setattr(server, "engine", configured_engine)
+
+    with pytest.raises(ToolError) as raised:
+        server.execute_query("SELECT nosuchcol FROM users")
+
+    message = str(raised.value)
+    assert "[sql_error]" in message
+    assert "no such column: nosuchcol" in message
+    # The caller wrote the inner query, not the row-limit wrapper around it.
+    assert "limited_query" not in message
+
+
+def test_a_blocked_query_explains_what_to_send_instead(
+    configured_engine, monkeypatch
+):
+    monkeypatch.setattr(server, "engine", configured_engine)
+
+    with pytest.raises(ToolError) as raised:
+        server.execute_query("DELETE FROM users")
+
+    assert "[unsafe_query]" in str(raised.value)
+    assert "read-only" in str(raised.value)
+
+
+def test_the_undecorated_helpers_still_raise_for_python_callers(
+    configured_engine, monkeypatch
+):
+    # The *_data functions are the testable seam; they stay exception-based so
+    # internal composition keeps working.
+    monkeypatch.setattr(server, "engine", configured_engine)
+
+    with pytest.raises(ToolInputError, match="Table not found: usrs"):
+        server.explore_schema_data(table_name="usrs")
