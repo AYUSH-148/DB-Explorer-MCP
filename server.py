@@ -13,7 +13,7 @@ from config import (
 )
 from db import create_configured_engine
 from explain import explain_safe
-from inspector import get_all_tables, get_table_detail
+from inspector import DEFAULT_TABLE_LIMIT, get_schema_page, get_table_detail
 from index_suggest import suggest_indexes
 from migration import get_migration_context, validate_migration as validate_migration_data
 from safety import execute_safe
@@ -32,19 +32,40 @@ engine = create_configured_engine(DATABASE_URL)
 def explore_schema_data(
     table_name: str | None = None,
     include_sample_data: bool = False,
+    name_pattern: str | None = None,
+    detail: bool = False,
+    limit: int = DEFAULT_TABLE_LIMIT,
+    offset: int = 0,
 ) -> dict[str, Any]:
     if table_name:
         return get_table_detail(engine, table_name, include_sample_data)
-    return {"tables": get_all_tables(engine)}
+    return get_schema_page(
+        engine,
+        name_pattern=name_pattern,
+        limit=limit,
+        offset=offset,
+        detail=detail,
+    )
 
 
 @mcp.tool
 def explore_schema(
     table_name: str | None = None,
     include_sample_data: bool = False,
+    name_pattern: str | None = None,
+    detail: bool = False,
+    limit: int = DEFAULT_TABLE_LIMIT,
+    offset: int = 0,
 ) -> dict[str, Any]:
     """Explore database tables, columns, keys, indexes, and sample rows."""
-    return explore_schema_data(table_name, include_sample_data)
+    return explore_schema_data(
+        table_name,
+        include_sample_data,
+        name_pattern=name_pattern,
+        detail=detail,
+        limit=limit,
+        offset=offset,
+    )
 
 
 def execute_query_data(sql: str, row_limit: int = 100) -> dict[str, Any]:

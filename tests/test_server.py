@@ -22,6 +22,37 @@ def test_explore_schema_tool_returns_all_tables(configured_engine, monkeypatch):
     assert [table["name"] for table in result["tables"]] == ["orders", "users"]
 
 
+def test_explore_schema_tool_defaults_to_a_summary(configured_engine, monkeypatch):
+    monkeypatch.setattr(server, "engine", configured_engine)
+
+    result = server.explore_schema_data()
+
+    assert result["tables"][0] == {"name": "orders", "column_count": 3}
+    assert result["limit"] == server.DEFAULT_TABLE_LIMIT
+    assert result["detail_hint"]
+
+
+def test_explore_schema_tool_filters_and_pages(configured_engine, monkeypatch):
+    monkeypatch.setattr(server, "engine", configured_engine)
+
+    result = server.explore_schema_data(name_pattern="user", limit=1)
+
+    assert [table["name"] for table in result["tables"]] == ["users"]
+    assert result["has_more"] is False
+
+
+def test_explore_schema_tool_can_expand_the_page(configured_engine, monkeypatch):
+    monkeypatch.setattr(server, "engine", configured_engine)
+
+    result = server.explore_schema_data(detail=True)
+
+    assert [column["name"] for column in result["tables"][0]["columns"]] == [
+        "id",
+        "user_id",
+        "total",
+    ]
+
+
 def test_explore_schema_tool_returns_table_detail(configured_engine, monkeypatch):
     monkeypatch.setattr(server, "engine", configured_engine)
 
