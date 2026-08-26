@@ -23,10 +23,18 @@ BLOCKED_KEYWORDS = {
     "INSERT",
     "INTO",
     "REVOKE",
-    "SET",
     "TRUNCATE",
     "UPDATE",
 }
+
+# SET is deliberately absent. It rejected `SELECT set FROM config`, because
+# sqlparse types a bare `set` as a Keyword rather than a Name, and it protected
+# nothing: every statement that changes session state -- SET search_path,
+# SET ROLE, SET SESSION TRANSACTION READ WRITE, even SET x = (SELECT 1) -- parses
+# as statement type UNKNOWN and is refused by the type check above, while the
+# UPDATE ... SET form inside a data-modifying CTE is caught by UPDATE. Quoting
+# the column (`SELECT "set"`) was the only workaround, which is a poor thing to
+# ask of a caller for no gain in safety.
 
 # Row locks are refused because a locking read is not a read: it blocks other
 # transactions from writing those rows, so a tool that advertises itself as
