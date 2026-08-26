@@ -124,6 +124,9 @@ Every `execute_query`, `explain_query`, and `suggest_index` call routes through 
 - **`SELECT` only**, determined from the parsed statement type rather than a string prefix → `Only SELECT queries are allowed. Got: DELETE`
 - **No SQL comments.** `--`, `/*`, `*/` are refused outright, closing the classic comment-smuggling route
 - **No blocked keywords** anywhere in the token stream: `ALTER`, `CREATE`, `DELETE`, `DROP`, `EXEC`, `EXECUTE`, `GRANT`, `INSERT`, `INTO`, `REVOKE`, `SET`, `TRUNCATE`, `UPDATE`
+- **No locking clause.** `FOR UPDATE`, `FOR NO KEY UPDATE`, `FOR SHARE`, `FOR KEY SHARE` and MySQL's `LOCK IN SHARE MODE` are refused, because a locking read is not a read: it blocks other transactions from writing those rows. It is also the one write-adjacent behaviour the read-only transaction below does *not* stop — Postgres `READ ONLY` disallows `INSERT`, `UPDATE`, `DELETE` and DDL, but not `SELECT ... FOR SHARE`.
+
+  This is matched as a **clause**, not as a keyword, and the distinction is the point. `SHARE` alone is a legal column name — `sqlparse` types the `share` in `SELECT share FROM cap_table` as a `Keyword` — so adding `SHARE` to the denylist above would reject a real query. A flat set of words is the wrong shape for a rule about multi-word clauses, so [safety.py](safety.py) collects the keyword sequence and matches `FOR [NO] [KEY] UPDATE|SHARE` against it. A `FOR` belonging to something else (`FOR XML`, `FOR JSON`, `FOR SYSTEM_TIME`) falls through, because its target is not a lock strength.
 
 Every query that passes is wrapped as `SELECT * FROM (<your query>) AS limited_query LIMIT <row_limit>`, so an unbounded scan cannot flood the client's context. The wrap is unconditional: a `LIMIT` in your own query narrows the inner result, but `row_limit` still caps what comes back, so `LIMIT 500` with the default `row_limit` returns 100 rows. `row_limit` is itself clamped to 1000, so raising it cannot defeat the guard.
 
@@ -171,7 +174,7 @@ Requires Python 3.11+ and [uv](https://docs.astral.sh/uv/).
 ```powershell
 uv sync
 uv run python tests/seed_test_db.py   # creates sample.db
-uv run pytest                         # 116 tests, no external database needed
+uv run pytest                         # 133 tests, no external database needed
 uv run server.py                      # stdio transport
 ```
 
@@ -311,7 +314,7 @@ For real user identity rather than one shared secret, swap `SharedSecretVerifier
 uv run pytest
 ```
 
-116 tests covering the safety layer, value serialization, read-only enforcement and timeouts, HTTP authentication, inspector, explain, index suggestions, schema health, migration validation, error reporting, and the tool wrappers. Each uses a temporary SQLite database, so the suite needs no credentials and no running server.
+133 tests covering the safety layer, value serialization, read-only enforcement and timeouts, HTTP authentication, inspector, explain, index suggestions, schema health, migration validation, error reporting, and the tool wrappers. Each uses a temporary SQLite database, so the suite needs no credentials and no running server.
 
 SQLite cannot produce the types that break a real driver -- it has no `NUMERIC` and returns `str`/`int` for nearly everything -- so [tests/test_serialization.py](tests/test_serialization.py) exercises `Decimal`, `datetime`, `UUID`, and binary values directly rather than through a query. A PostgreSQL and MySQL test path is the next gap worth closing.
 

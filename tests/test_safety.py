@@ -49,6 +49,49 @@ def test_mutating_queries_are_blocked(query, keyword):
     assert keyword in reason
 
 
+@pytest.mark.parametrize(
+    "query, clause",
+    [
+        ("SELECT * FROM users FOR UPDATE", "FOR UPDATE"),
+        ("SELECT * FROM users FOR NO KEY UPDATE", "FOR UPDATE"),
+        ("SELECT * FROM users FOR SHARE", "FOR SHARE"),
+        ("SELECT * FROM users FOR KEY SHARE", "FOR SHARE"),
+        ("SELECT * FROM users FOR UPDATE NOWAIT", "FOR UPDATE"),
+        ("SELECT * FROM users FOR UPDATE SKIP LOCKED", "FOR UPDATE"),
+        ("SELECT * FROM users FOR UPDATE OF users", "FOR UPDATE"),
+        ("select * from users for share", "FOR SHARE"),
+        ("SELECT * FROM users LOCK IN SHARE MODE", "LOCK IN SHARE MODE"),
+    ],
+)
+def test_locking_clauses_are_blocked(query, clause):
+    """A locking read is not a read: row locks block other writers, and unlike a
+    write they survive a read-only transaction."""
+    is_safe, reason = validate_query(query)
+
+    assert not is_safe
+    assert reason == f"Locking clauses are not allowed: {clause}"
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        # `share` is a legal column name, and sqlparse types it as a Keyword --
+        # so a bare BLOCKED_KEYWORDS entry for SHARE would reject these.
+        "SELECT share FROM cap_table",
+        "SELECT market_share, share FROM sales WHERE share > 1",
+        "SELECT * FROM t WHERE label = 'FOR SHARE'",
+        "SELECT * FROM t WHERE note = 'LOCK IN SHARE MODE'",
+        # A FOR that introduces something other than a lock strength.
+        "SELECT * FROM t FOR XML PATH('x')",
+        "SELECT * FROM t FOR JSON AUTO",
+        "SELECT * FROM t FOR SYSTEM_TIME AS OF '2024-01-01'",
+        "SELECT extract(day FROM ts) FROM t",
+    ],
+)
+def test_clause_matching_does_not_reject_plain_reads(query):
+    assert validate_query(query) == (True, "Query is safe")
+
+
 def test_multiple_statements_are_blocked():
     is_safe, reason = validate_query("SELECT * FROM users; DELETE FROM users")
 
