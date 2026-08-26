@@ -8,6 +8,10 @@ from errors import ToolInputError, unsafe_query
 from serialization import jsonable_rows
 
 
+# The row cap is a context guard, so the caller must not be able to raise it
+# without bound. Mirrors MAX_TABLE_LIMIT in inspector.py.
+MAX_ROW_LIMIT = 1000
+
 BLOCKED_KEYWORDS = {
     "ALTER",
     "CREATE",
@@ -65,6 +69,10 @@ def execute_safe(
             hint="Pass the number of rows you want back, at least 1.",
             received=row_limit,
         )
+    # Clamped rather than rejected: a caller asking for more rows than the cap
+    # wants as many as it can have, and failing the query would tell it nothing
+    # it can act on.
+    row_limit = min(row_limit, MAX_ROW_LIMIT)
 
     is_safe, reason = validate_query(sql)
     if not is_safe:
