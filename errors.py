@@ -68,6 +68,10 @@ _UNSAFE_HINTS = {
         "validate_migration to check DDL without running it."
     ),
     "Blocked keyword": "Rewrite the query as a plain SELECT without that keyword.",
+    "Locking clauses": (
+        "Drop the locking clause. A row lock blocks other writers, so this "
+        "read-only server refuses it; a plain SELECT returns the same rows."
+    ),
 }
 
 

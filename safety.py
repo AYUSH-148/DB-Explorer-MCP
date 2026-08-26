@@ -23,10 +23,52 @@ BLOCKED_KEYWORDS = {
     "INSERT",
     "INTO",
     "REVOKE",
-    "SET",
     "TRUNCATE",
     "UPDATE",
 }
+
+# SET is deliberately absent. It rejected `SELECT set FROM config`, because
+# sqlparse types a bare `set` as a Keyword rather than a Name, and it protected
+# nothing: every statement that changes session state -- SET search_path,
+# SET ROLE, SET SESSION TRANSACTION READ WRITE, even SET x = (SELECT 1) -- parses
+# as statement type UNKNOWN and is refused by the type check above, while the
+# UPDATE ... SET form inside a data-modifying CTE is caught by UPDATE. Quoting
+# the column (`SELECT "set"`) was the only workaround, which is a poor thing to
+# ask of a caller for no gain in safety.
+
+# Row locks are refused because a locking read is not a read: it blocks other
+# transactions from writing those rows, so a tool that advertises itself as
+# read-only could stall the writers around it. It is also the one write-adjacent
+# behaviour a read-only transaction does not stop -- Postgres disallows INSERT,
+# UPDATE, DELETE and DDL under READ ONLY, but not SELECT ... FOR SHARE.
+#
+# Matched as a clause rather than as a keyword. `SHARE` alone is a legal column
+# name -- sqlparse types the `share` in `SELECT share FROM cap_table` as a
+# Keyword, so a BLOCKED_KEYWORDS entry would reject that real query. A flat set
+# of words is the wrong shape for a rule about multi-word clauses.
+_LOCK_MODIFIERS = frozenset({"NO", "KEY"})
+_LOCK_TARGETS = frozenset({"UPDATE", "SHARE"})
+_MYSQL_LOCK_CLAUSE = ("LOCK", "IN", "SHARE", "MODE")
+
+
+def _locking_clause(keywords: list[str]) -> str | None:
+    """Return the locking clause this keyword sequence contains, if any."""
+    for index, keyword in enumerate(keywords):
+        if keyword == "FOR":
+            # FOR [NO] [KEY] UPDATE | SHARE. Dropping the optional modifiers
+            # keeps all four Postgres spellings on one path, and a `FOR` that
+            # belongs to something else (FOR XML, FOR SYSTEM_TIME) falls through
+            # because its target is not a lock strength.
+            rest = [
+                word
+                for word in keywords[index + 1 : index + 4]
+                if word not in _LOCK_MODIFIERS
+            ]
+            if rest and rest[0] in _LOCK_TARGETS:
+                return f"FOR {rest[0]}"
+        if tuple(keywords[index : index + 4]) == _MYSQL_LOCK_CLAUSE:
+            return " ".join(_MYSQL_LOCK_CLAUSE)
+    return None
 
 
 def validate_query(sql: str) -> tuple[bool, str]:
@@ -44,14 +86,25 @@ def validate_query(sql: str) -> tuple[bool, str]:
         return False, f"Only SELECT queries are allowed. Got: {statement_type}"
 
     # Comments are detected on parsed tokens rather than as raw substrings so that
-    # a string literal containing "--" is not mistaken for a comment.
+    # a string literal containing "--" is not mistaken for a comment. Keywords are
+    # collected in the same pass, in order, so the clause check below can look at
+    # sequences rather than single words.
+    keywords: list[str] = []
     for token in statement.flatten():
         if token.ttype in Comment:
             return False, "SQL comments are not allowed"
         if token.ttype in (DML, DDL, Keyword):
-            keyword = token.value.upper()
-            if keyword in BLOCKED_KEYWORDS:
-                return False, f"Blocked keyword detected: {keyword}"
+            keywords.append(token.value.upper())
+
+    # Checked before the denylist so that FOR UPDATE reports the clause that
+    # actually rejected it rather than the bare UPDATE it happens to contain.
+    clause = _locking_clause(keywords)
+    if clause:
+        return False, f"Locking clauses are not allowed: {clause}"
+
+    for keyword in keywords:
+        if keyword in BLOCKED_KEYWORDS:
+            return False, f"Blocked keyword detected: {keyword}"
 
     return True, "Query is safe"
 

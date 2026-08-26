@@ -123,7 +123,10 @@ Every `execute_query`, `explain_query`, and `suggest_index` call routes through 
 - **Single statement.** `SELECT 1; DROP TABLE users` → `Exactly one SQL statement is required`
 - **`SELECT` only**, determined from the parsed statement type rather than a string prefix → `Only SELECT queries are allowed. Got: DELETE`
 - **No SQL comments.** `--`, `/*`, `*/` are refused outright, closing the classic comment-smuggling route
-- **No blocked keywords** anywhere in the token stream: `ALTER`, `CREATE`, `DELETE`, `DROP`, `EXEC`, `EXECUTE`, `GRANT`, `INSERT`, `INTO`, `REVOKE`, `SET`, `TRUNCATE`, `UPDATE`
+- **No blocked keywords** anywhere in the token stream: `ALTER`, `CREATE`, `DELETE`, `DROP`, `EXEC`, `EXECUTE`, `GRANT`, `INSERT`, `INTO`, `REVOKE`, `TRUNCATE`, `UPDATE`
+- **No locking clause.** `FOR UPDATE`, `FOR NO KEY UPDATE`, `FOR SHARE`, `FOR KEY SHARE` and MySQL's `LOCK IN SHARE MODE` are refused, because a locking read is not a read: it blocks other transactions from writing those rows. It is also the one write-adjacent behaviour the read-only transaction below does *not* stop — Postgres `READ ONLY` disallows `INSERT`, `UPDATE`, `DELETE` and DDL, but not `SELECT ... FOR SHARE`.
+
+  This is matched as a **clause**, not as a keyword, and the distinction is the point. `SHARE` alone is a legal column name — `sqlparse` types the `share` in `SELECT share FROM cap_table` as a `Keyword` — so adding `SHARE` to the denylist above would reject a real query. A flat set of words is the wrong shape for a rule about multi-word clauses, so [safety.py](safety.py) collects the keyword sequence and matches `FOR [NO] [KEY] UPDATE|SHARE` against it. A `FOR` belonging to something else (`FOR XML`, `FOR JSON`, `FOR SYSTEM_TIME`) falls through, because its target is not a lock strength.
 
 Every query that passes is wrapped as `SELECT * FROM (<your query>) AS limited_query LIMIT <row_limit>`, so an unbounded scan cannot flood the client's context. The wrap is unconditional: a `LIMIT` in your own query narrows the inner result, but `row_limit` still caps what comes back, so `LIMIT 500` with the default `row_limit` returns 100 rows. `row_limit` is itself clamped to 1000, so raising it cannot defeat the guard.
 
@@ -171,7 +174,7 @@ Requires Python 3.11+ and [uv](https://docs.astral.sh/uv/).
 ```powershell
 uv sync
 uv run python tests/seed_test_db.py   # creates sample.db
-uv run pytest                         # 116 tests, no external database needed
+uv run pytest                         # 148 tests, no external database needed
 uv run server.py                      # stdio transport
 ```
 
@@ -311,7 +314,7 @@ For real user identity rather than one shared secret, swap `SharedSecretVerifier
 uv run pytest
 ```
 
-116 tests covering the safety layer, value serialization, read-only enforcement and timeouts, HTTP authentication, inspector, explain, index suggestions, schema health, migration validation, error reporting, and the tool wrappers. Each uses a temporary SQLite database, so the suite needs no credentials and no running server.
+148 tests covering the safety layer, value serialization, read-only enforcement and timeouts, HTTP authentication, inspector, explain, index suggestions, schema health, migration validation, error reporting, and the tool wrappers. Each uses a temporary SQLite database, so the suite needs no credentials and no running server.
 
 SQLite cannot produce the types that break a real driver -- it has no `NUMERIC` and returns `str`/`int` for nearly everything -- so [tests/test_serialization.py](tests/test_serialization.py) exercises `Decimal`, `datetime`, `UUID`, and binary values directly rather than through a query. A PostgreSQL and MySQL test path is the next gap worth closing.
 
@@ -337,7 +340,9 @@ tests/            pytest suite over temporary SQLite databases
 
 - **Migrations are never executed.** The server returns schema context and validates scripts; you run the DDL. That keeps the connection read-only in practice, not just by policy.
 - **Query-mode `suggest_index` is tuned to SQLite plan output**, which exposes a `detail` column containing `SCAN`. On PostgreSQL and MySQL the plan is still returned in full, but automatic recommendations will usually be empty — use `table_name` mode there, which works from foreign-key metadata on every dialect.
-- **The keyword denylist matches whole tokens, not substrings**, so a keyword that merely contains a blocked word is unaffected: `GROUPING SETS` and `SELECT 1 AS "set"` both pass, where a naive `"SET" in sql` check would reject them. The cost is the reverse case: `SET` and `INTO` are blocked outright, so `SELECT * INTO archive FROM users` is refused even though its statement type is `SELECT` — which is the point, since it writes. Deliberate trade: a false rejection is cheap, a false acceptance is not.
+- **The keyword denylist matches whole tokens, not substrings**, so a keyword that merely contains a blocked word is unaffected: `GROUPING SETS` and `SELECT grant_date FROM permissions` both pass, where a naive `"SET" in sql` check would reject the first and `"GRANT" in sql` the second.
+- **Each denylist entry has to earn its place.** `INTO` does: `SELECT * INTO archive FROM users` has statement type `SELECT` but creates a table, so only the keyword scan catches it. `SET` did not, and was removed — every statement that changes session state (`SET ROLE`, `SET search_path`, even `SET x = (SELECT 1)`) parses as type `UNKNOWN` and is refused by the type check, while `UPDATE ... SET` inside a data-modifying CTE is caught by `UPDATE`. All it added was rejecting `SELECT set FROM config`, since `sqlparse` types a bare `set` as a keyword rather than a column name.
+- **Four of the twelve entries are load-bearing** — `INSERT`, `UPDATE`, `DELETE` and `INTO` are reachable in a statement whose type is `SELECT`, the first three through Postgres data-modifying CTEs. The rest are redundant, because a CTE accepts only `INSERT`, `UPDATE`, `DELETE` and `MERGE`, never DDL: no legal `SELECT`-typed statement can contain `DROP`. They stay as a second line if `sqlparse` type detection ever regresses.
 - **Two read-only statements are rejected for lack of a statement type.** `sqlparse` reports `UNKNOWN` for a parenthesized `(SELECT 1)` and for `VALUES (1)`, and the type check refuses anything that is not `SELECT`. Both are harmless; neither is currently accepted.
 - **The row cap is a context guard, not a performance guard.** A heavy aggregate still runs in full on the database before its output is limited. `QUERY_TIMEOUT_SECONDS` is what bounds the cost of that work.
 - **Binary columns are summarised, not returned.** Values up to 256 bytes arrive hex-encoded, which suits `BINARY(16)` UUIDs and digests; anything larger is reported as a size only. Inlining a multi-megabyte blob would consume the context window it was sent to.

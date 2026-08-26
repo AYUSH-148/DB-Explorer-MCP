@@ -49,6 +49,101 @@ def test_mutating_queries_are_blocked(query, keyword):
     assert keyword in reason
 
 
+@pytest.mark.parametrize(
+    "query, clause",
+    [
+        ("SELECT * FROM users FOR UPDATE", "FOR UPDATE"),
+        ("SELECT * FROM users FOR NO KEY UPDATE", "FOR UPDATE"),
+        ("SELECT * FROM users FOR SHARE", "FOR SHARE"),
+        ("SELECT * FROM users FOR KEY SHARE", "FOR SHARE"),
+        ("SELECT * FROM users FOR UPDATE NOWAIT", "FOR UPDATE"),
+        ("SELECT * FROM users FOR UPDATE SKIP LOCKED", "FOR UPDATE"),
+        ("SELECT * FROM users FOR UPDATE OF users", "FOR UPDATE"),
+        ("select * from users for share", "FOR SHARE"),
+        ("SELECT * FROM users LOCK IN SHARE MODE", "LOCK IN SHARE MODE"),
+    ],
+)
+def test_locking_clauses_are_blocked(query, clause):
+    """A locking read is not a read: row locks block other writers, and unlike a
+    write they survive a read-only transaction."""
+    is_safe, reason = validate_query(query)
+
+    assert not is_safe
+    assert reason == f"Locking clauses are not allowed: {clause}"
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        # `share` is a legal column name, and sqlparse types it as a Keyword --
+        # so a bare BLOCKED_KEYWORDS entry for SHARE would reject these.
+        "SELECT share FROM cap_table",
+        "SELECT market_share, share FROM sales WHERE share > 1",
+        "SELECT * FROM t WHERE label = 'FOR SHARE'",
+        "SELECT * FROM t WHERE note = 'LOCK IN SHARE MODE'",
+        # A FOR that introduces something other than a lock strength.
+        "SELECT * FROM t FOR XML PATH('x')",
+        "SELECT * FROM t FOR JSON AUTO",
+        "SELECT * FROM t FOR SYSTEM_TIME AS OF '2024-01-01'",
+        "SELECT extract(day FROM ts) FROM t",
+    ],
+)
+def test_clause_matching_does_not_reject_plain_reads(query):
+    assert validate_query(query) == (True, "Query is safe")
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        "SET search_path = evil",
+        "SET ROLE admin",
+        "SET SESSION TRANSACTION READ WRITE",
+        "SET LOCAL statement_timeout = 0",
+        "SET GLOBAL max_connections = 1",
+        "SET TIME ZONE 'UTC'",
+        "SET CONSTRAINTS ALL DEFERRED",
+        "SET @a = 1",
+        # The forms that look most like a SELECT, and still are not one.
+        "SET x = (SELECT 1)",
+        "SET search_path = (SELECT 'public')",
+    ],
+)
+def test_session_state_changes_are_blocked_by_the_type_check(query):
+    """SET is not on the denylist, so this is what covers it instead. sqlparse
+    types every SET form as UNKNOWN and only SELECT is accepted -- if that ever
+    changes, these fail rather than the hole opening silently."""
+    is_safe, reason = validate_query(query)
+
+    assert not is_safe
+    assert reason == "Only SELECT queries are allowed. Got: UNKNOWN"
+
+
+def test_update_set_in_a_cte_is_blocked_by_update():
+    """The other half of SET's former job: the UPDATE ... SET form is reachable
+    with statement type SELECT, and UPDATE is what stops it."""
+    is_safe, reason = validate_query(
+        "WITH x AS (UPDATE t SET a = 1 RETURNING *) SELECT * FROM x"
+    )
+
+    assert not is_safe
+    assert reason == "Blocked keyword detected: UPDATE"
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        # `set` is a legal column name; sqlparse types it as a Keyword, so a
+        # BLOCKED_KEYWORDS entry rejected these real queries for no gain.
+        "SELECT set FROM config",
+        "SELECT set, name FROM config WHERE set = 1",
+        "SELECT settings FROM t",
+        "SELECT offset FROM t",
+    ],
+)
+def test_columns_named_like_keywords_are_allowed(query):
+    assert validate_query(query) == (True, "Query is safe")
+
+
 def test_multiple_statements_are_blocked():
     is_safe, reason = validate_query("SELECT * FROM users; DELETE FROM users")
 
