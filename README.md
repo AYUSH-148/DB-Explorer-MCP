@@ -100,7 +100,7 @@ Both modes run identical tool code — only `MCP_TRANSPORT` changes.
 | Tool | Arguments | Returns |
 | --- | --- | --- |
 | `explore_schema` | `table_name?`, `include_sample_data=false`, `name_pattern?`, `detail=false`, `limit=200`, `offset=0` | A table listing with column counts, or one table's columns, PK, FKs, indexes, row count, and up to 3 sample rows |
-| `execute_query` | `sql`, `row_limit=100` | `columns`, `rows`, `count` for one validated `SELECT` |
+| `execute_query` | `sql`, `row_limit=100` (max 1000) | `columns`, `rows`, `count` for one validated `SELECT` |
 | `explain_query` | `sql` | Native execution plan plus the resolved `dialect` |
 | `validate_schema` | `table_name?` | Schema issues with `severity`, `code`, `message`, `suggestion` |
 | `suggest_index` | `query?` **xor** `table_name?` | `CREATE INDEX` recommendations with reasons |
@@ -125,7 +125,7 @@ Every `execute_query`, `explain_query`, and `suggest_index` call routes through 
 - **No SQL comments.** `--`, `/*`, `*/` are refused outright, closing the classic comment-smuggling route
 - **No blocked keywords** anywhere in the token stream: `ALTER`, `CREATE`, `DELETE`, `DROP`, `EXEC`, `EXECUTE`, `GRANT`, `INSERT`, `INTO`, `REVOKE`, `SET`, `TRUNCATE`, `UPDATE`
 
-Every query that passes is wrapped as `SELECT * FROM (<your query>) AS limited_query LIMIT <row_limit>`, so an unbounded scan cannot flood the client's context. The wrap is unconditional: a `LIMIT` in your own query narrows the inner result, but `row_limit` still caps what comes back, so `LIMIT 500` with the default `row_limit` returns 100 rows.
+Every query that passes is wrapped as `SELECT * FROM (<your query>) AS limited_query LIMIT <row_limit>`, so an unbounded scan cannot flood the client's context. The wrap is unconditional: a `LIMIT` in your own query narrows the inner result, but `row_limit` still caps what comes back, so `LIMIT 500` with the default `row_limit` returns 100 rows. `row_limit` is itself clamped to 1000, so raising it cannot defeat the guard.
 
 Validation is only the first of three layers, because a keyword blocklist cannot see a query that is syntactically fine and still harmful:
 
@@ -171,7 +171,7 @@ Requires Python 3.11+ and [uv](https://docs.astral.sh/uv/).
 ```powershell
 uv sync
 uv run python tests/seed_test_db.py   # creates sample.db
-uv run pytest                         # 32 tests, no external database needed
+uv run pytest                         # 116 tests, no external database needed
 uv run server.py                      # stdio transport
 ```
 
@@ -311,7 +311,7 @@ For real user identity rather than one shared secret, swap `SharedSecretVerifier
 uv run pytest
 ```
 
-111 tests covering the safety layer, value serialization, read-only enforcement and timeouts, HTTP authentication, inspector, explain, index suggestions, schema health, migration validation, error reporting, and the tool wrappers. Each uses a temporary SQLite database, so the suite needs no credentials and no running server.
+116 tests covering the safety layer, value serialization, read-only enforcement and timeouts, HTTP authentication, inspector, explain, index suggestions, schema health, migration validation, error reporting, and the tool wrappers. Each uses a temporary SQLite database, so the suite needs no credentials and no running server.
 
 SQLite cannot produce the types that break a real driver -- it has no `NUMERIC` and returns `str`/`int` for nearly everything -- so [tests/test_serialization.py](tests/test_serialization.py) exercises `Decimal`, `datetime`, `UUID`, and binary values directly rather than through a query. A PostgreSQL and MySQL test path is the next gap worth closing.
 
@@ -337,7 +337,8 @@ tests/            pytest suite over temporary SQLite databases
 
 - **Migrations are never executed.** The server returns schema context and validates scripts; you run the DDL. That keeps the connection read-only in practice, not just by policy.
 - **Query-mode `suggest_index` is tuned to SQLite plan output**, which exposes a `detail` column containing `SCAN`. On PostgreSQL and MySQL the plan is still returned in full, but automatic recommendations will usually be empty — use `table_name` mode there, which works from foreign-key metadata on every dialect.
-- **`SET` and `INTO` are blocked keywords**, so a few legitimate `SELECT`s (for example `GROUPING SETS`) are rejected. Deliberate trade: a false rejection is cheap, a false acceptance is not.
+- **The keyword denylist matches whole tokens, not substrings**, so a keyword that merely contains a blocked word is unaffected: `GROUPING SETS` and `SELECT 1 AS "set"` both pass, where a naive `"SET" in sql` check would reject them. The cost is the reverse case: `SET` and `INTO` are blocked outright, so `SELECT * INTO archive FROM users` is refused even though its statement type is `SELECT` — which is the point, since it writes. Deliberate trade: a false rejection is cheap, a false acceptance is not.
+- **Two read-only statements are rejected for lack of a statement type.** `sqlparse` reports `UNKNOWN` for a parenthesized `(SELECT 1)` and for `VALUES (1)`, and the type check refuses anything that is not `SELECT`. Both are harmless; neither is currently accepted.
 - **The row cap is a context guard, not a performance guard.** A heavy aggregate still runs in full on the database before its output is limited. `QUERY_TIMEOUT_SECONDS` is what bounds the cost of that work.
 - **Binary columns are summarised, not returned.** Values up to 256 bytes arrive hex-encoded, which suits `BINARY(16)` UUIDs and digests; anything larger is reported as a size only. Inlining a multi-megabyte blob would consume the context window it was sent to.
 - **Wide `NUMERIC` values arrive as strings.** A decimal that fits a float is a JSON number so it sorts and compares correctly; one that does not keeps its exact digits rather than being silently rounded.
