@@ -60,9 +60,23 @@ def table_not_found(table_name: str, known_tables: Sequence[str]) -> ToolInputEr
 
 
 # The rule that fired decides what the caller should do about it.
+#
+# Order matters: the first marker found in the reason wins, so a specific marker
+# must precede any more general one it is a special case of. "Got: UNKNOWN" sits
+# above "Only SELECT" for exactly that reason.
 _UNSAFE_HINTS = {
     "comments": "Remove the SQL comments and resend the query.",
     "one SQL statement": "Send a single statement, one call per statement.",
+    # A read whose statement type sqlparse could not determine -- not a write.
+    # The generic read-only hint below actively misleads here, because it answers
+    # a question the caller did not ask: it sent a SELECT and would be sent off
+    # to validate_migration. Name the shapes that actually cause this instead.
+    "Got: UNKNOWN": (
+        "The statement type could not be determined, so it was refused rather "
+        "than guessed at. Send a plain SELECT: unwrap a parenthesized query "
+        "such as (SELECT 1), and rewrite VALUES or TABLE shorthand as "
+        "SELECT ... FROM."
+    ),
     "Only SELECT": (
         "This server is read-only. Use explore_schema for structure, and "
         "validate_migration to check DDL without running it."

@@ -174,7 +174,7 @@ Requires Python 3.11+ and [uv](https://docs.astral.sh/uv/).
 ```powershell
 uv sync
 uv run python tests/seed_test_db.py   # creates sample.db
-uv run pytest                         # 148 tests, no external database needed
+uv run pytest                         # 151 tests, no external database needed
 uv run server.py                      # stdio transport
 ```
 
@@ -314,7 +314,7 @@ For real user identity rather than one shared secret, swap `SharedSecretVerifier
 uv run pytest
 ```
 
-148 tests covering the safety layer, value serialization, read-only enforcement and timeouts, HTTP authentication, inspector, explain, index suggestions, schema health, migration validation, error reporting, and the tool wrappers. Each uses a temporary SQLite database, so the suite needs no credentials and no running server.
+151 tests covering the safety layer, value serialization, read-only enforcement and timeouts, HTTP authentication, inspector, explain, index suggestions, schema health, migration validation, error reporting, and the tool wrappers. Each uses a temporary SQLite database, so the suite needs no credentials and no running server.
 
 SQLite cannot produce the types that break a real driver -- it has no `NUMERIC` and returns `str`/`int` for nearly everything -- so [tests/test_serialization.py](tests/test_serialization.py) exercises `Decimal`, `datetime`, `UUID`, and binary values directly rather than through a query. A PostgreSQL and MySQL test path is the next gap worth closing.
 
@@ -343,7 +343,9 @@ tests/            pytest suite over temporary SQLite databases
 - **The keyword denylist matches whole tokens, not substrings**, so a keyword that merely contains a blocked word is unaffected: `GROUPING SETS` and `SELECT grant_date FROM permissions` both pass, where a naive `"SET" in sql` check would reject the first and `"GRANT" in sql` the second.
 - **Each denylist entry has to earn its place.** `INTO` does: `SELECT * INTO archive FROM users` has statement type `SELECT` but creates a table, so only the keyword scan catches it. `SET` did not, and was removed — every statement that changes session state (`SET ROLE`, `SET search_path`, even `SET x = (SELECT 1)`) parses as type `UNKNOWN` and is refused by the type check, while `UPDATE ... SET` inside a data-modifying CTE is caught by `UPDATE`. All it added was rejecting `SELECT set FROM config`, since `sqlparse` types a bare `set` as a keyword rather than a column name.
 - **Four of the twelve entries are load-bearing** — `INSERT`, `UPDATE`, `DELETE` and `INTO` are reachable in a statement whose type is `SELECT`, the first three through Postgres data-modifying CTEs. The rest are redundant, because a CTE accepts only `INSERT`, `UPDATE`, `DELETE` and `MERGE`, never DDL: no legal `SELECT`-typed statement can contain `DROP`. They stay as a second line if `sqlparse` type detection ever regresses.
-- **Two read-only statements are rejected for lack of a statement type.** `sqlparse` reports `UNKNOWN` for a parenthesized `(SELECT 1)` and for `VALUES (1)`, and the type check refuses anything that is not `SELECT`. Both are harmless; neither is currently accepted.
+- **A few read-only statements are rejected for lack of a statement type.** `sqlparse` reports `UNKNOWN` for a parenthesized `(SELECT 1)`, for `VALUES (1)` and for `TABLE users`, and the type check refuses anything that is not `SELECT`. All are harmless; none is currently accepted.
+
+  This is left as a rejection rather than fixed by unwrapping, because the incidence is near zero — a caller writes the plain `SELECT` — and widening what the parser accepts to serve a query nobody sends is a poor trade against the risk. What *was* fixed is the explanation: these reasons and a genuine write both contain `Only SELECT`, so they used to collapse to the same hint, and a caller that sent a read was told the server is read-only and pointed at `validate_migration`. `Got: UNKNOWN` now carries its own hint naming the shapes that cause it. A rejection the caller can recover from in one turn is an acceptable cost; a rejection that misdiagnoses itself is not.
 - **The row cap is a context guard, not a performance guard.** A heavy aggregate still runs in full on the database before its output is limited. `QUERY_TIMEOUT_SECONDS` is what bounds the cost of that work.
 - **Binary columns are summarised, not returned.** Values up to 256 bytes arrive hex-encoded, which suits `BINARY(16)` UUIDs and digests; anything larger is reported as a size only. Inlining a multi-megabyte blob would consume the context window it was sent to.
 - **Wide `NUMERIC` values arrive as strings.** A decimal that fits a float is a JSON number so it sorts and compares correctly; one that does not keeps its exact digits rather than being silently rounded.

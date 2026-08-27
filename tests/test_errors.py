@@ -73,6 +73,8 @@ def test_table_not_found_suggests_nothing_when_no_name_is_close():
         ("Only SELECT queries are allowed. Got: DELETE", "read-only"),
         ("Blocked keyword detected: INTO", "plain SELECT"),
         ("Exactly one SQL statement is required", "one call per statement"),
+        ("Locking clauses are not allowed: FOR SHARE", "Drop the locking clause"),
+        ("Only SELECT queries are allowed. Got: UNKNOWN", "could not be determined"),
     ],
 )
 def test_unsafe_query_hint_names_the_fix_for_the_rule_that_fired(reason, expected):
@@ -80,6 +82,21 @@ def test_unsafe_query_hint_names_the_fix_for_the_rule_that_fired(reason, expecte
 
     assert error.code == "unsafe_query"
     assert expected in error.hint
+
+
+def test_undetermined_type_and_a_real_write_get_different_hints():
+    """Both reasons contain "Only SELECT", but they are opposite problems: one is
+    a read sqlparse could not classify, the other is an actual write. The hint
+    lookup returns the first matching marker, so this also guards the ordering of
+    _UNSAFE_HINTS -- move "Got: UNKNOWN" below "Only SELECT" and it fails.
+    """
+    undetermined = unsafe_query("Only SELECT queries are allowed. Got: UNKNOWN")
+    write = unsafe_query("Only SELECT queries are allowed. Got: DELETE")
+
+    assert undetermined.hint != write.hint
+    # The caller sent a read, so it must not be pointed at the migration tool.
+    assert "validate_migration" not in undetermined.hint
+    assert "validate_migration" in write.hint
 
 
 def _operational_error(driver_message: str) -> OperationalError:
