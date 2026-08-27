@@ -38,9 +38,16 @@ BLOCKED_KEYWORDS = {
 
 # Row locks are refused because a locking read is not a read: it blocks other
 # transactions from writing those rows, so a tool that advertises itself as
-# read-only could stall the writers around it. It is also the one write-adjacent
-# behaviour a read-only transaction does not stop -- Postgres disallows INSERT,
-# UPDATE, DELETE and DDL under READ ONLY, but not SELECT ... FOR SHARE.
+# read-only could stall the writers around it.
+#
+# This is defense in depth, not a hole being closed. Verified against
+# PostgreSQL 16: a read-only transaction refuses both forms itself, with
+# "cannot execute SELECT FOR SHARE in a read-only transaction". What this check
+# adds is a rejection before a connection is opened, an error naming the clause
+# and the fix rather than a generic driver message, and consistency -- FOR UPDATE
+# was previously refused only incidentally, because UPDATE happens to be on the
+# denylist for data-modifying CTEs. MySQL's LOCK IN SHARE MODE under
+# SET SESSION TRANSACTION READ ONLY is untested.
 #
 # Matched as a clause rather than as a keyword. `SHARE` alone is a legal column
 # name -- sqlparse types the `share` in `SELECT share FROM cap_table` as a
