@@ -3,16 +3,7 @@ from typing import Any
 from sqlalchemy import Engine, inspect
 
 from errors import table_not_found
-
-
-def _has_index_for_columns(
-    indexes: list[dict[str, Any]],
-    columns: list[str],
-) -> bool:
-    return any(
-        index.get("column_names", [])[: len(columns)] == columns
-        for index in indexes
-    )
+from indexes import covering_column_lists, is_covered
 
 
 def validate_schema(
@@ -33,6 +24,8 @@ def validate_schema(
         primary_key = database_inspector.get_pk_constraint(current_table)
         foreign_keys = database_inspector.get_foreign_keys(current_table)
         indexes = database_inspector.get_indexes(current_table)
+        unique_constraints = database_inspector.get_unique_constraints(current_table)
+        covering = covering_column_lists(indexes, primary_key, unique_constraints)
         primary_key_columns = primary_key.get("constrained_columns", [])
 
         if not primary_key_columns:
@@ -63,7 +56,7 @@ def validate_schema(
             constrained_columns = foreign_key.get("constrained_columns", [])
             if not constrained_columns:
                 continue
-            if not _has_index_for_columns(indexes, constrained_columns):
+            if not is_covered(constrained_columns, covering):
                 columns_text = ", ".join(constrained_columns)
                 issues.append(
                     {
@@ -81,7 +74,10 @@ def validate_schema(
                     }
                 )
 
-        if not indexes and not primary_key_columns:
+        # Checked against what exists rather than against `covering`, which drops an
+        # expression index: that index cannot serve a foreign key, but it is still
+        # an index, and a table that has one does not have "no indexes".
+        if not indexes and not primary_key_columns and not unique_constraints:
             issues.append(
                 {
                     "severity": "info",

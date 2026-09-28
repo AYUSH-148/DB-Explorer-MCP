@@ -4,16 +4,7 @@ from sqlalchemy import Engine, inspect
 
 from errors import ToolInputError, table_not_found
 from explain import explain_safe
-
-
-def _has_index_for_columns(
-    indexes: list[dict[str, Any]],
-    columns: list[str],
-) -> bool:
-    return any(
-        index.get("column_names", [])[: len(columns)] == columns
-        for index in indexes
-    )
+from indexes import covering_column_lists, is_covered
 
 
 def suggest_indexes(
@@ -45,10 +36,14 @@ def suggest_indexes(
         if table_name not in known_tables:
             raise table_not_found(table_name, known_tables)
 
-        indexes = database_inspector.get_indexes(table_name)
+        covering = covering_column_lists(
+            database_inspector.get_indexes(table_name),
+            database_inspector.get_pk_constraint(table_name),
+            database_inspector.get_unique_constraints(table_name),
+        )
         for foreign_key in database_inspector.get_foreign_keys(table_name):
             columns = foreign_key.get("constrained_columns", [])
-            if columns and not _has_index_for_columns(indexes, columns):
+            if columns and not is_covered(columns, covering):
                 column_list = ", ".join(columns)
                 recommendations.append(
                     {
