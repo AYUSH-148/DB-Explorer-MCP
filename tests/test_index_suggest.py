@@ -2,6 +2,7 @@ from pathlib import Path
 
 import pytest
 from sqlalchemy import create_engine, text
+from sqlalchemy.engine import make_url
 
 import index_suggest
 from index_suggest import suggest_indexes
@@ -86,6 +87,35 @@ def test_suggested_sql_quotes_reserved_and_mixed_case_names(tmp_path: Path):
         connection.execute(text(mixed["sql"]))
     assert suggest_indexes(engine, table_name="order")["recommendations"] == []
     assert suggest_indexes(engine, table_name="Ledger")["recommendations"] == []
+
+
+def _dialect(url: str):
+    return make_url(url).get_dialect()()
+
+
+@pytest.mark.parametrize("url", ["mysql+pymysql://", "mariadb+pymysql://"])
+def test_mysql_suggestions_quote_with_backticks_even_under_ansi_quotes(url):
+    # The state SQLAlchemy leaves a MySQL dialect in after connecting to a server
+    # with ANSI_QUOTES on: its own preparer quotes with double quotes, which a
+    # session without ANSI_QUOTES reads as a string.
+    dialect = _dialect(url)
+    dialect.identifier_preparer = dialect.preparer(dialect, server_ansiquotes=True)
+    assert dialect.identifier_preparer.quote("order") == '"order"'
+
+    preparer = index_suggest._paste_safe_preparer(dialect)
+
+    assert preparer.quote("order") == "`order`"
+    assert preparer.quote("UserId") == "`UserId`"
+    assert preparer.quote("user_id") == "user_id"
+
+
+def test_other_dialects_keep_their_own_quoting():
+    dialect = _dialect("postgresql+psycopg2://")
+
+    preparer = index_suggest._paste_safe_preparer(dialect)
+
+    assert preparer is dialect.identifier_preparer
+    assert preparer.quote("order") == '"order"'
 
 
 def test_table_mode_skips_index_reflection_without_foreign_keys(engine, monkeypatch):

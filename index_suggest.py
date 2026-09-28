@@ -1,10 +1,26 @@
 from typing import Any
 
 from sqlalchemy import Engine, inspect
+from sqlalchemy.engine.interfaces import Dialect
+from sqlalchemy.sql.compiler import IdentifierPreparer
 
 from errors import ToolInputError, table_not_found
 from explain import explain_safe
 from indexes import reflect_coverage
+
+
+def _paste_safe_preparer(dialect: Dialect) -> IdentifierPreparer:
+    """Return the quoting for SQL that will be run somewhere else.
+
+    A suggested CREATE INDEX is pasted into another client, not run here. On
+    MySQL, SQLAlchemy quotes with double quotes when this connection has
+    ANSI_QUOTES on, and in a session without it "order" is a string literal
+    and the statement is a syntax error. Backticks quote an identifier in
+    every MySQL session, whatever its sql_mode.
+    """
+    if dialect.name in {"mysql", "mariadb"}:
+        return dialect.preparer(dialect, server_ansiquotes=False)
+    return dialect.identifier_preparer
 
 
 def suggest_indexes(
@@ -41,7 +57,7 @@ def suggest_indexes(
         # nothing for it to answer, so it is only reflected when there is one.
         if foreign_keys:
             coverage = reflect_coverage(database_inspector, [table_name])[table_name]
-            preparer = engine.dialect.identifier_preparer
+            preparer = _paste_safe_preparer(engine.dialect)
             for foreign_key in foreign_keys:
                 columns = foreign_key.get("constrained_columns", [])
                 if not columns or coverage.covers(columns):
