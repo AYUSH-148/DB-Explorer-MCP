@@ -7,7 +7,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ```powershell
 uv sync                                # install deps
 uv run python tests/seed_test_db.py    # (re)create sample.db
-uv run pytest                          # run all 151 tests
+uv run pytest                          # run all 194 tests
 uv run pytest tests/test_safety.py     # run one test file
 uv run pytest tests/test_safety.py::test_name -v   # run a single test
 uv run server.py                       # start server, stdio transport
@@ -34,6 +34,7 @@ Safety validation is layer one of three — `db.py` adds a statement timeout (`Q
 - `explain.py` — dialect-aware `EXPLAIN` / `EXPLAIN QUERY PLAN`
 - `index_suggest.py` — index recommendations from a live plan (SQLite-tuned) or FK metadata (works on every dialect)
 - `schema_health.py` — objective schema audit (`missing_primary_key`, `unindexed_foreign_key`, `wide_table`, `no_indexes`)
+- `indexes.py` — which indexes can serve a foreign key, shared by `schema_health.py` and `index_suggest.py`. Counts the implicit PRIMARY KEY and UNIQUE indexes that `get_indexes()` omits; ignores partial, GIN/GiST/BRIN and FULLTEXT/SPATIAL indexes. Reads UNIQUE through SQLite's auto-indexes rather than `get_unique_constraints()`, which raises `NotImplementedError` on SQL Server and drops constraints whose case differs on SQLite.
 - `migration.py` — returns schema context and validates `up`/`down` SQL statement types; **never executes DDL**
 - `errors.py` — `ToolInputError` (a `ValueError` subclass) internally; converted to FastMCP `ToolError` only at the `server.py` boundary, because `ToolError` is the one error type that survives `mask_error_details=True`. Every error carries a `code` and a corrective hint.
 - `serialization.py` — driver values (Decimal, datetime, UUID, binary) to JSON-safe primitives
@@ -44,4 +45,4 @@ Transports (stdio vs. streamable-http) run identical tool code; only `MCP_TRANSP
 
 ## Testing notes
 
-All 151 tests run against a temporary SQLite database — no credentials, no running server, no network. SQLite can't produce the driver types that matter for correctness (no `NUMERIC`, returns `str`/`int` for nearly everything), so `tests/test_serialization.py` exercises `Decimal`/`datetime`/`UUID`/binary directly rather than through a query. There is currently no PostgreSQL/MySQL test path.
+All 194 tests run against a temporary SQLite database — no credentials, no running server, no network. SQLite can't produce the driver types that matter for correctness (no `NUMERIC`, returns `str`/`int` for nearly everything), so `tests/test_serialization.py` exercises `Decimal`/`datetime`/`UUID`/binary directly rather than through a query. There is currently no PostgreSQL/MySQL test path.

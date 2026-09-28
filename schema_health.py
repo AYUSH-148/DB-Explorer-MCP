@@ -3,16 +3,10 @@ from typing import Any
 from sqlalchemy import Engine, inspect
 
 from errors import table_not_found
+from indexes import reflect_coverage
 
-
-def _has_index_for_columns(
-    indexes: list[dict[str, Any]],
-    columns: list[str],
-) -> bool:
-    return any(
-        index.get("column_names", [])[: len(columns)] == columns
-        for index in indexes
-    )
+# Reflection is keyed by (schema, table); every lookup uses the default schema.
+_DEFAULT_SCHEMA: str | None = None
 
 
 def validate_schema(
@@ -28,14 +22,27 @@ def validate_schema(
     selected_tables = [table_name] if table_name else tables
     issues: list[dict[str, Any]] = []
 
-    for current_table in selected_tables:
-        columns = database_inspector.get_columns(current_table)
-        primary_key = database_inspector.get_pk_constraint(current_table)
-        foreign_keys = database_inspector.get_foreign_keys(current_table)
-        indexes = database_inspector.get_indexes(current_table)
-        primary_key_columns = primary_key.get("constrained_columns", [])
+    # One query per kind for every selected table, rather than one per kind per
+    # table: a 500-table audit costs four queries instead of two thousand.
+    filter_names = list(selected_tables)
+    all_columns = (
+        database_inspector.get_multi_columns(filter_names=filter_names)
+        if filter_names
+        else {}
+    )
+    all_foreign_keys = (
+        database_inspector.get_multi_foreign_keys(filter_names=filter_names)
+        if filter_names
+        else {}
+    )
+    coverage = reflect_coverage(database_inspector, selected_tables)
 
-        if not primary_key_columns:
+    for current_table in selected_tables:
+        columns = all_columns.get((_DEFAULT_SCHEMA, current_table), [])
+        foreign_keys = all_foreign_keys.get((_DEFAULT_SCHEMA, current_table), [])
+        table_coverage = coverage[current_table]
+
+        if not table_coverage.primary_key:
             issues.append(
                 {
                     "severity": "warning",
@@ -63,7 +70,7 @@ def validate_schema(
             constrained_columns = foreign_key.get("constrained_columns", [])
             if not constrained_columns:
                 continue
-            if not _has_index_for_columns(indexes, constrained_columns):
+            if not table_coverage.covers(constrained_columns):
                 columns_text = ", ".join(constrained_columns)
                 issues.append(
                     {
@@ -81,7 +88,7 @@ def validate_schema(
                     }
                 )
 
-        if not indexes and not primary_key_columns:
+        if not table_coverage.has_any_index:
             issues.append(
                 {
                     "severity": "info",

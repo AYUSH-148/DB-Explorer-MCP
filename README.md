@@ -80,6 +80,7 @@ Errors travel the same path in reverse: a raised `ValueError` becomes an MCP too
 | [explain.py](explain.py) | Dialect-aware plans (`EXPLAIN QUERY PLAN` on SQLite, `EXPLAIN` elsewhere) |
 | [index_suggest.py](index_suggest.py) | Recommendations from a live plan or from FK metadata |
 | [schema_health.py](schema_health.py) | Objective schema audit, no heuristics about naming or style |
+| [indexes.py](indexes.py) | Which columns a table already has indexed, including the implicit indexes behind PRIMARY KEY and UNIQUE |
 | [migration.py](migration.py) | Schema context out, script validation in — never executes DDL |
 | [errors.py](errors.py) | Coded, hinted errors and driver-error classification |
 | [config.py](config.py) | Environment resolution with fail-fast checks |
@@ -107,7 +108,7 @@ Both modes run identical tool code — only `MCP_TRANSPORT` changes.
 | `migration_context` | — | Dialect and full schema, for client-side migration drafting |
 | `validate_migration` | `up_sql`, `down_sql` | Parsed statement types per script; **never executed** |
 
-`validate_schema` reports four codes: `missing_primary_key`, `unindexed_foreign_key`, `wide_table` (50+ columns), and `no_indexes`.
+`validate_schema` reports four codes: `missing_primary_key`, `unindexed_foreign_key`, `wide_table` (50+ columns), and `no_indexes`. A foreign key counts as indexed when any index, the primary key, or a unique constraint starts with its columns in order, so a one-to-one child keyed on its parent's id is not reported, and no `CREATE INDEX` is suggested that would duplicate an index the database already built. An index that cannot look rows up by value does not count: a partial index (`WHERE ...`), a PostgreSQL GIN, GiST or BRIN index, or a MySQL `FULLTEXT`/`SPATIAL` key. Suggested `CREATE INDEX` statements quote their names, so they run as written against a table called `order` or a PostgreSQL column called `"UserId"`. On MySQL the quotes are backticks, whatever the server's `sql_mode`, because a suggestion is pasted into another session and double quotes only name an identifier where `ANSI_QUOTES` is on.
 
 `explore_schema` is cheap by default and expensive only on request. With no arguments it
 returns table names and column counts — a handful of queries however wide the database
@@ -174,7 +175,7 @@ Requires Python 3.11+ and [uv](https://docs.astral.sh/uv/).
 ```powershell
 uv sync
 uv run python tests/seed_test_db.py   # creates sample.db
-uv run pytest                         # 151 tests, no external database needed
+uv run pytest                         # 194 tests, no external database needed
 uv run server.py                      # stdio transport
 ```
 
@@ -314,7 +315,7 @@ For real user identity rather than one shared secret, swap `SharedSecretVerifier
 uv run pytest
 ```
 
-151 tests covering the safety layer, value serialization, read-only enforcement and timeouts, HTTP authentication, inspector, explain, index suggestions, schema health, migration validation, error reporting, and the tool wrappers. Each uses a temporary SQLite database, so the suite needs no credentials and no running server.
+194 tests covering the safety layer, value serialization, read-only enforcement and timeouts, HTTP authentication, inspector, explain, index suggestions, schema health, migration validation, error reporting, and the tool wrappers. Each uses a temporary SQLite database, so the suite needs no credentials and no running server.
 
 SQLite cannot produce the types that break a real driver -- it has no `NUMERIC` and returns `str`/`int` for nearly everything -- so [tests/test_serialization.py](tests/test_serialization.py) exercises `Decimal`, `datetime`, `UUID`, and binary values directly rather than through a query. A PostgreSQL and MySQL test path is the next gap worth closing.
 
@@ -330,6 +331,7 @@ inspector.py      schema reflection (columns, PK, FKs, indexes, samples)
 explain.py        dialect-aware EXPLAIN
 index_suggest.py  index recommendations from plans or FK metadata
 schema_health.py  objective schema issue reporting
+indexes.py        index coverage shared by schema_health and index_suggest
 migration.py      migration context and non-executing script validation
 errors.py         coded errors with hints, and driver-error classification
 config.py         environment configuration with fail-fast checks

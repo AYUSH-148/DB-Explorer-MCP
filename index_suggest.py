@@ -1,19 +1,26 @@
 from typing import Any
 
 from sqlalchemy import Engine, inspect
+from sqlalchemy.engine.interfaces import Dialect
+from sqlalchemy.sql.compiler import IdentifierPreparer
 
 from errors import ToolInputError, table_not_found
 from explain import explain_safe
+from indexes import reflect_coverage
 
 
-def _has_index_for_columns(
-    indexes: list[dict[str, Any]],
-    columns: list[str],
-) -> bool:
-    return any(
-        index.get("column_names", [])[: len(columns)] == columns
-        for index in indexes
-    )
+def _paste_safe_preparer(dialect: Dialect) -> IdentifierPreparer:
+    """Return the quoting for SQL that will be run somewhere else.
+
+    A suggested CREATE INDEX is pasted into another client, not run here. On
+    MySQL, SQLAlchemy quotes with double quotes when this connection has
+    ANSI_QUOTES on, and in a session without it "order" is a string literal
+    and the statement is a syntax error. Backticks quote an identifier in
+    every MySQL session, whatever its sql_mode.
+    """
+    if dialect.name in {"mysql", "mariadb"}:
+        return dialect.preparer(dialect, server_ansiquotes=False)
+    return dialect.identifier_preparer
 
 
 def suggest_indexes(
@@ -45,18 +52,28 @@ def suggest_indexes(
         if table_name not in known_tables:
             raise table_not_found(table_name, known_tables)
 
-        indexes = database_inspector.get_indexes(table_name)
-        for foreign_key in database_inspector.get_foreign_keys(table_name):
-            columns = foreign_key.get("constrained_columns", [])
-            if columns and not _has_index_for_columns(indexes, columns):
-                column_list = ", ".join(columns)
+        foreign_keys = database_inspector.get_foreign_keys(table_name)
+        # Coverage costs two more queries, and a table with no foreign keys has
+        # nothing for it to answer, so it is only reflected when there is one.
+        if foreign_keys:
+            coverage = reflect_coverage(database_inspector, [table_name])[table_name]
+            preparer = _paste_safe_preparer(engine.dialect)
+            for foreign_key in foreign_keys:
+                columns = foreign_key.get("constrained_columns", [])
+                if not columns or coverage.covers(columns):
+                    continue
+                # Quoted, because this is SQL someone will paste and run: a table
+                # called `order`, or a Postgres column called "UserId", breaks the
+                # statement unquoted. quote() leaves an ordinary name alone.
+                index_name = preparer.quote(f"idx_{table_name}_{'_'.join(columns)}")
+                column_list = ", ".join(preparer.quote(column) for column in columns)
                 recommendations.append(
                     {
                         "table": table_name,
                         "columns": columns,
                         "sql": (
-                            f"CREATE INDEX idx_{table_name}_{'_'.join(columns)} "
-                            f"ON {table_name} ({column_list});"
+                            f"CREATE INDEX {index_name} "
+                            f"ON {preparer.quote(table_name)} ({column_list});"
                         ),
                         "reason": "Foreign-key columns are not covered by an index.",
                     }
