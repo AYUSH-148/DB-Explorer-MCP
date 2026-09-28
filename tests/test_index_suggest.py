@@ -3,6 +3,7 @@ from pathlib import Path
 import pytest
 from sqlalchemy import create_engine, text
 
+import index_suggest
 from index_suggest import suggest_indexes
 from tests.seed_test_db import create_sample_database
 
@@ -51,6 +52,49 @@ def test_table_mode_still_recommends_when_the_key_is_not_leading(coverage_engine
     result = suggest_indexes(coverage_engine, table_name="member")
 
     assert [rec["columns"] for rec in result["recommendations"]] == [["user_id"]]
+
+
+def test_suggested_sql_quotes_reserved_and_mixed_case_names(tmp_path: Path):
+    # Unquoted, both CREATE INDEX statements below are syntax errors on
+    # Postgres: `order` is reserved, and UserId would fold to userid.
+    engine = create_engine(f"sqlite:///{tmp_path / 'names.db'}")
+    with engine.begin() as connection:
+        connection.execute(text("CREATE TABLE users (id INTEGER PRIMARY KEY)"))
+        connection.execute(
+            text(
+                'CREATE TABLE "order" (id INTEGER PRIMARY KEY, '
+                "user_id INTEGER REFERENCES users(id))"
+            )
+        )
+        connection.execute(
+            text(
+                "CREATE TABLE Ledger (id INTEGER PRIMARY KEY, "
+                "UserId INTEGER REFERENCES users(id))"
+            )
+        )
+
+    reserved = suggest_indexes(engine, table_name="order")["recommendations"][0]
+    mixed = suggest_indexes(engine, table_name="Ledger")["recommendations"][0]
+
+    assert reserved["sql"] == 'CREATE INDEX idx_order_user_id ON "order" (user_id);'
+    assert mixed["sql"] == (
+        'CREATE INDEX "idx_Ledger_UserId" ON "Ledger" ("UserId");'
+    )
+    # The statement it suggests is one the database accepts.
+    with engine.begin() as connection:
+        connection.execute(text(reserved["sql"]))
+        connection.execute(text(mixed["sql"]))
+    assert suggest_indexes(engine, table_name="order")["recommendations"] == []
+    assert suggest_indexes(engine, table_name="Ledger")["recommendations"] == []
+
+
+def test_table_mode_skips_index_reflection_without_foreign_keys(engine, monkeypatch):
+    def unexpected(*args, **kwargs):
+        raise AssertionError("index coverage reflected for a table with no FKs")
+
+    monkeypatch.setattr(index_suggest, "reflect_coverage", unexpected)
+
+    assert suggest_indexes(engine, table_name="users")["recommendations"] == []
 
 
 def test_query_mode_reports_full_scan(engine):

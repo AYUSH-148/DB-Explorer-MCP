@@ -108,7 +108,7 @@ Both modes run identical tool code — only `MCP_TRANSPORT` changes.
 | `migration_context` | — | Dialect and full schema, for client-side migration drafting |
 | `validate_migration` | `up_sql`, `down_sql` | Parsed statement types per script; **never executed** |
 
-`validate_schema` reports four codes: `missing_primary_key`, `unindexed_foreign_key`, `wide_table` (50+ columns), and `no_indexes`. A foreign key counts as indexed when any index, the primary key, or a unique constraint starts with its columns in order, so a one-to-one child keyed on its parent's id is not reported, and no `CREATE INDEX` is suggested that would duplicate an index the database already built.
+`validate_schema` reports four codes: `missing_primary_key`, `unindexed_foreign_key`, `wide_table` (50+ columns), and `no_indexes`. A foreign key counts as indexed when any index, the primary key, or a unique constraint starts with its columns in order, so a one-to-one child keyed on its parent's id is not reported, and no `CREATE INDEX` is suggested that would duplicate an index the database already built. An index that cannot look rows up by value does not count: a partial index (`WHERE ...`), a PostgreSQL GIN, GiST or BRIN index, or a MySQL `FULLTEXT`/`SPATIAL` key. Suggested `CREATE INDEX` statements quote their names, so they run as written against a table called `order` or a PostgreSQL column called `"UserId"`.
 
 `explore_schema` is cheap by default and expensive only on request. With no arguments it
 returns table names and column counts — a handful of queries however wide the database
@@ -175,7 +175,7 @@ Requires Python 3.11+ and [uv](https://docs.astral.sh/uv/).
 ```powershell
 uv sync
 uv run python tests/seed_test_db.py   # creates sample.db
-uv run pytest                         # 172 tests, no external database needed
+uv run pytest                         # 191 tests, no external database needed
 uv run server.py                      # stdio transport
 ```
 
@@ -315,7 +315,7 @@ For real user identity rather than one shared secret, swap `SharedSecretVerifier
 uv run pytest
 ```
 
-172 tests covering the safety layer, value serialization, read-only enforcement and timeouts, HTTP authentication, inspector, explain, index suggestions, schema health, migration validation, error reporting, and the tool wrappers. Each uses a temporary SQLite database, so the suite needs no credentials and no running server.
+191 tests covering the safety layer, value serialization, read-only enforcement and timeouts, HTTP authentication, inspector, explain, index suggestions, schema health, migration validation, error reporting, and the tool wrappers. Each uses a temporary SQLite database, so the suite needs no credentials and no running server.
 
 SQLite cannot produce the types that break a real driver -- it has no `NUMERIC` and returns `str`/`int` for nearly everything -- so [tests/test_serialization.py](tests/test_serialization.py) exercises `Decimal`, `datetime`, `UUID`, and binary values directly rather than through a query. A PostgreSQL and MySQL test path is the next gap worth closing.
 
