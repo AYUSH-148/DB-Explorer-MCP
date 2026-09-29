@@ -2,7 +2,8 @@ from typing import Any
 
 from sqlalchemy import Engine, text
 from sqlparse import parse
-from sqlparse.tokens import Comment, DDL, DML, Keyword
+from sqlparse.sql import Statement
+from sqlparse.tokens import Comment, DDL, DML, Keyword, Literal
 from db import read_only_connection
 from errors import ToolInputError, unsafe_query
 from serialization import jsonable_rows
@@ -78,6 +79,31 @@ def _locking_clause(keywords: list[str]) -> str | None:
     return None
 
 
+_COMMENT_MARKERS = ("--", "/*", "*/")
+# A bare "#hi" lexes as a Name, not a Comment, yet MySQL treats it as one. Only
+# the SELECT-only path adds it: in migrations "#" is legitimate (SQL Server #temp).
+_QUERY_COMMENT_MARKERS = _COMMENT_MARKERS + ("#",)
+
+
+def has_comment(statement: Statement, markers: tuple[str, ...] = _COMMENT_MARKERS) -> bool:
+    """Detect comments on parsed tokens so a literal containing "--" is not one.
+
+    Real comments lex as Comment tokens. An unterminated "/*" does not: it lexes
+    as the separate tokens "/" and "*". So the non-literal tokens are also
+    rejoined and searched for the markers. Literals and backtick names are
+    masked with a space so their contents are never searched and the tokens
+    around them cannot fuse into a marker.
+    """
+    parts = []
+    for token in statement.flatten():
+        if token.ttype in Comment:
+            return True
+        quoted = token.ttype in Literal or token.value.startswith("`")
+        parts.append(" " if quoted else token.value)
+    code = "".join(parts)
+    return any(marker in code for marker in markers)
+
+
 def validate_query(sql: str) -> tuple[bool, str]:
     """Return whether SQL contains exactly one safe read-only statement."""
     if not isinstance(sql, str) or not sql.strip():
@@ -92,14 +118,13 @@ def validate_query(sql: str) -> tuple[bool, str]:
         statement_type = statement.get_type() or "UNKNOWN"
         return False, f"Only SELECT queries are allowed. Got: {statement_type}"
 
-    # Comments are detected on parsed tokens rather than as raw substrings so that
-    # a string literal containing "--" is not mistaken for a comment. Keywords are
-    # collected in the same pass, in order, so the clause check below can look at
+    if has_comment(statement, _QUERY_COMMENT_MARKERS):
+        return False, "SQL comments are not allowed"
+
+    # Keywords are collected in order so the clause check below can look at
     # sequences rather than single words.
     keywords: list[str] = []
     for token in statement.flatten():
-        if token.ttype in Comment:
-            return False, "SQL comments are not allowed"
         if token.ttype in (DML, DDL, Keyword):
             keywords.append(token.value.upper())
 

@@ -271,3 +271,27 @@ def test_subquery_limit_does_not_bypass_row_limit(tmp_path: Path):
     )
 
     assert result["count"] == 2
+
+
+@pytest.mark.parametrize("sql", ["SELECT 1 /* open", "SELECT 1 */"])
+def test_unterminated_block_comment_markers_are_blocked(sql):
+    ok, reason = validate_query(sql)
+
+    assert not ok
+    assert reason == "SQL comments are not allowed"
+
+
+def test_comment_markers_inside_literals_are_allowed():
+    assert validate_query("SELECT 'a--b', '/* x */', \"c--d\"")[0]
+
+
+@pytest.mark.parametrize("sql", ["SELECT 1 #hi", "SELECT 1 #select 2"])
+def test_hash_comments_without_space_are_blocked(sql):
+    ok, reason = validate_query(sql)
+
+    assert not ok
+    assert reason == "SQL comments are not allowed"
+
+
+def test_hash_inside_literal_is_allowed():
+    assert validate_query("SELECT '#hi'")[0]
