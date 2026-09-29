@@ -5,6 +5,7 @@ from sqlparse import parse
 
 from errors import ToolInputError
 from inspector import get_all_tables
+from safety import has_comment
 
 
 def get_migration_context(engine: Engine) -> dict[str, Any]:
@@ -23,19 +24,19 @@ def _validate_script(script: str, name: str) -> list[str]:
             message=f"{name} SQL is required",
             hint="Both up_sql and down_sql must be non-empty.",
         )
-    if "--" in script or "/*" in script or "*/" in script:
-        raise ToolInputError(
-            code="comments_not_allowed",
-            message=f"{name} SQL comments are not allowed",
-            hint="Strip the comments from the migration script and resend it.",
-        )
-
     statements = [statement for statement in parse(script) if statement.tokens]
     if not statements:
         raise ToolInputError(
             code="unparsable_sql",
             message=f"{name} SQL could not be parsed",
             hint="Send complete, semicolon-separated DDL statements.",
+        )
+
+    if any(has_comment(statement) for statement in statements):
+        raise ToolInputError(
+            code="comments_not_allowed",
+            message=f"{name} SQL comments are not allowed",
+            hint="Strip the comments from the migration script and resend it.",
         )
 
     statement_types = []

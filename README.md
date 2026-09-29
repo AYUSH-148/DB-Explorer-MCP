@@ -123,7 +123,7 @@ Every `execute_query`, `explain_query`, and `suggest_index` call routes through 
 
 - **Single statement.** `SELECT 1; DROP TABLE users` → `Exactly one SQL statement is required`
 - **`SELECT` only**, determined from the parsed statement type rather than a string prefix → `Only SELECT queries are allowed. Got: DELETE`
-- **No SQL comments.** `--`, `/*`, `*/` are refused outright, closing the classic comment-smuggling route
+- **No SQL comments.** `--`, `/*`, `*/` are refused outright (outside string literals, so `'a--b'` still passes), closing the classic comment-smuggling route
 - **No blocked keywords** anywhere in the token stream: `ALTER`, `CREATE`, `DELETE`, `DROP`, `EXEC`, `EXECUTE`, `GRANT`, `INSERT`, `INTO`, `REVOKE`, `TRUNCATE`, `UPDATE`
 - **No locking clause.** `FOR UPDATE`, `FOR NO KEY UPDATE`, `FOR SHARE`, `FOR KEY SHARE` and MySQL's `LOCK IN SHARE MODE` are refused, because a locking read is not a read: it blocks other transactions from writing those rows. This one is defense in depth rather than a hole being closed — PostgreSQL 16 refuses both forms itself inside a read-only transaction (`cannot execute SELECT FOR SHARE in a read-only transaction`, verified). What the check adds is a rejection before a connection is opened, an error naming the clause and the fix instead of a generic driver message, and consistency: `FOR UPDATE` used to be refused only incidentally, because `UPDATE` is on the denylist for data-modifying CTEs.
 
