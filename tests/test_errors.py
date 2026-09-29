@@ -1,5 +1,6 @@
 import pytest
 from sqlalchemy.exc import OperationalError
+from sqlalchemy.exc import TimeoutError as PoolTimeoutError
 
 from errors import (
     ToolInputError,
@@ -133,3 +134,31 @@ def test_the_row_limit_wrapper_is_not_echoed_back_to_the_caller():
 
     assert error.message == "The database rejected the query: no such column: nope"
     assert "limited_query" not in error.as_text()
+
+
+def test_a_refused_connection_is_not_blamed_on_the_query():
+    # Raised while connecting, so SQLAlchemy has no statement to attach.
+    refused = OperationalError(None, None, Exception("Connection refused"))
+
+    error = from_database_error(refused)
+
+    assert error.code == "database_unavailable"
+    assert "not a problem with your query" in error.hint
+
+
+def test_a_connection_dropped_mid_query_is_not_blamed_on_the_query():
+    dropped = OperationalError(
+        "SELECT 1", {}, Exception("server closed the connection unexpectedly"),
+        connection_invalidated=True,
+    )
+
+    assert from_database_error(dropped).code == "database_unavailable"
+
+
+def test_an_exhausted_pool_is_reported_as_busy():
+    exhausted = PoolTimeoutError("QueuePool limit of size 5 overflow 10 reached")
+
+    error = from_database_error(exhausted)
+
+    assert error.code == "server_busy"
+    assert "Retry" in error.hint

@@ -9,6 +9,9 @@ from collections.abc import Sequence
 from difflib import get_close_matches
 from typing import Any
 
+from sqlalchemy.exc import DBAPIError
+from sqlalchemy.exc import TimeoutError as PoolTimeoutError
+
 
 class ToolInputError(ValueError):
     """A caller-fixable error, carrying a code and a corrective hint."""
@@ -127,6 +130,29 @@ def from_database_error(
     """Classify a driver error into something the caller can act on."""
     detail = str(getattr(error, "orig", None) or error).strip()
     lowered = detail.lower()
+
+    # Neither of these is about the query, and a sql_error hint would send the
+    # caller off rewriting SQL that was never the problem.
+    if isinstance(error, PoolTimeoutError):
+        return ToolInputError(
+            code="server_busy",
+            message="Every database connection is in use; no query was run",
+            hint="This is not a problem with your query. Retry it shortly, unchanged.",
+        )
+    # SQLAlchemy leaves statement unset when the failure came from connecting,
+    # and flags connection_invalidated when the link dropped mid-statement.
+    if isinstance(error, DBAPIError) and (
+        error.statement is None or error.connection_invalidated
+    ):
+        return ToolInputError(
+            code="database_unavailable",
+            message=f"The server could not reach the database: {detail}",
+            hint=(
+                "This is not a problem with your query. Retry it shortly, "
+                "unchanged; if it keeps failing, the server's DATABASE_URL or "
+                "network needs attention."
+            ),
+        )
 
     if any(marker in lowered for marker in _TIMEOUT_MARKERS):
         bound = f" of {timeout_seconds}s" if timeout_seconds else ""
