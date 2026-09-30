@@ -165,7 +165,14 @@ def from_database_error(
             ),
         )
 
-    if any(marker in lowered for marker in _MISSING_OBJECT_MARKERS):
+    if "duplicate column name" in lowered:
+        # MySQL refuses a derived table with repeated names, and every query
+        # runs inside one (the row-cap wrapper), so a legal join can land here.
+        hint = (
+            "Give each repeated output column its own alias, e.g. "
+            "SELECT u.id AS user_id, o.id AS order_id, instead of SELECT *."
+        )
+    elif any(marker in lowered for marker in _MISSING_OBJECT_MARKERS):
         hint = (
             "Call explore_schema(table_name=...) to confirm the table and "
             "column names before retrying."

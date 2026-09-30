@@ -101,7 +101,7 @@ Both modes run identical tool code — only `MCP_TRANSPORT` changes.
 | Tool | Arguments | Returns |
 | --- | --- | --- |
 | `explore_schema` | `table_name?`, `include_sample_data=false`, `name_pattern?`, `detail=false`, `limit=200`, `offset=0` | A listing of tables and views (each with a `kind` and column count), or one relation's `kind`, columns, PK, FKs, indexes, row count, and up to 3 sample rows |
-| `execute_query` | `sql`, `row_limit=100` (max 1000) | `columns`, `rows`, `count`, `truncated`, and the effective `row_limit` for one validated `SELECT` |
+| `execute_query` | `sql`, `row_limit=100` (max 1000) | `columns`, `rows`, `count`, `truncated`, and the effective `row_limit` for one validated `SELECT`; plus `duplicate_columns` and a `note` when a result repeats a column name (the repeats are labelled `id:1`, which is not valid SQL) |
 | `explain_query` | `sql` | Native execution plan plus the resolved `dialect` |
 | `validate_schema` | `table_name?` | Schema issues with `severity`, `code`, `message`, `suggestion` |
 | `suggest_index` | `query?` **xor** `table_name?` | `CREATE INDEX` recommendations with reasons |

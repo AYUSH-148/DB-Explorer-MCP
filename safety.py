@@ -1,3 +1,4 @@
+import re
 from typing import Any
 
 from sqlalchemy import Engine, text
@@ -141,6 +142,27 @@ def validate_query(sql: str) -> tuple[bool, str]:
     return True, "Query is safe"
 
 
+_RELABEL = re.compile(r"(.+):\d+")
+
+
+def _repeated_names(columns: list[str]) -> list[str]:
+    """Names that appear more than once in a result, in order of first repeat.
+
+    The row-cap wrapper is a derived table, and the driver or SQLAlchemy
+    relabels a repeated name there (id, id:1) so no row key is lost.
+    ponytail: a real column literally named like "id:1" beside "id" is
+    reported too; the column list carries nothing that tells them apart.
+    """
+    repeated: list[str] = []
+    for position, label in enumerate(columns):
+        earlier = columns[:position]
+        relabel = _RELABEL.fullmatch(label)
+        name = relabel[1] if relabel and relabel[1] in earlier else label
+        if name in earlier and name not in repeated:
+            repeated.append(name)
+    return repeated
+
+
 def execute_safe(
     engine: Engine,
     sql: str,
@@ -177,10 +199,20 @@ def execute_safe(
 
     truncated = len(rows) > row_limit
     rows = rows[:row_limit]
-    return {
+    response = {
         "columns": columns,
         "rows": rows,
         "count": len(rows),
         "truncated": truncated,
         "row_limit": row_limit,
     }
+
+    repeated = _repeated_names(columns)
+    if repeated:
+        response["duplicate_columns"] = repeated
+        response["note"] = (
+            f"Column names repeat: {', '.join(repeated)}. The later ones are "
+            "labelled name:1, name:2 and so on; those labels are not valid "
+            "SQL. Alias the columns in your query, e.g. u.id AS user_id."
+        )
+    return response

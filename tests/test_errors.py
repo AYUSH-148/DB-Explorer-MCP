@@ -162,3 +162,11 @@ def test_an_exhausted_pool_is_reported_as_busy():
 
     assert error.code == "server_busy"
     assert "Retry" in error.hint
+
+
+def test_a_duplicate_column_error_tells_the_caller_to_alias():
+    # MySQL raises this for the row-cap wrapper when a join repeats a name.
+    error = from_database_error(_operational_error("Duplicate column name 'id'"))
+
+    assert error.code == "sql_error"
+    assert "alias" in error.hint

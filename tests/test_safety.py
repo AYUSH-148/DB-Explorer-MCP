@@ -312,3 +312,28 @@ def test_hash_comments_without_space_are_blocked(sql):
 
 def test_hash_inside_literal_is_allowed():
     assert validate_query("SELECT '#hi'")[0]
+
+
+def test_repeated_column_names_are_reported_not_silently_relabelled(tmp_path: Path):
+    database_path = tmp_path / "sample.db"
+    create_sample_database(database_path)
+    engine = create_engine(f"sqlite:///{database_path}")
+
+    result = execute_safe(
+        engine, "SELECT * FROM users u JOIN orders o ON u.id = o.user_id"
+    )
+
+    assert result["columns"] == ["id", "name", "email", "id:1", "user_id", "total"]
+    assert result["duplicate_columns"] == ["id"]
+    assert "Alias the columns" in result["note"]
+
+
+def test_distinct_column_names_carry_no_duplicate_note(tmp_path: Path):
+    database_path = tmp_path / "sample.db"
+    create_sample_database(database_path)
+    engine = create_engine(f"sqlite:///{database_path}")
+
+    result = execute_safe(engine, "SELECT id, name FROM users")
+
+    assert "duplicate_columns" not in result
+    assert "note" not in result
