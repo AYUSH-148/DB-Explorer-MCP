@@ -165,16 +165,22 @@ def execute_safe(
 
     # The query is always wrapped. Looking for a LIMIT in the text instead would
     # accept one belonging to a subquery and leave the result set unbounded.
+    # One extra row is fetched so a capped result can be told apart from a
+    # complete one; without it the caller would report a partial set as whole.
     inner_query = sql.strip().rstrip(";")
-    query = f"SELECT * FROM ({inner_query}) AS limited_query LIMIT {row_limit}"
+    query = f"SELECT * FROM ({inner_query}) AS limited_query LIMIT {row_limit + 1}"
 
     with read_only_connection(engine) as connection:
         result = connection.execute(text(query))
         rows = jsonable_rows(result.mappings())
         columns = list(result.keys())
 
+    truncated = len(rows) > row_limit
+    rows = rows[:row_limit]
     return {
         "columns": columns,
         "rows": rows,
         "count": len(rows),
+        "truncated": truncated,
+        "row_limit": row_limit,
     }

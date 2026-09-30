@@ -64,9 +64,9 @@ A typical `execute_query` call:
 1. **Client** turns the user's question into SQL, using schema it fetched earlier via `explore_schema`.
 2. **FastMCP** deserializes the tool call and validates arguments against the tool's type hints.
 3. **safety.py** parses the SQL with `sqlparse` — one statement, type `SELECT`, no comments, no blocked keywords. Failure raises before any connection is opened.
-4. **Row cap** applied: if the query has no `LIMIT`, it is wrapped in `SELECT * FROM (…) AS limited_query LIMIT row_limit`.
-5. **SQLAlchemy** executes it on a pooled connection and the rows are serialized to plain dicts.
-6. **Client** receives `{columns, rows, count}` as structured JSON and explains it in natural language.
+4. **Row cap** applied: the query is always wrapped in `SELECT * FROM (…) AS limited_query LIMIT row_limit + 1`.
+5. **SQLAlchemy** executes it on a pooled connection and the rows are serialized to plain dicts. The probe row, if present, is dropped and sets `truncated`.
+6. **Client** receives `{columns, rows, count, truncated, row_limit}` as structured JSON and explains it in natural language.
 
 Errors travel the same path in reverse: a raised `ValueError` becomes an MCP tool error, which the client surfaces to the user while the server keeps serving.
 
@@ -101,7 +101,7 @@ Both modes run identical tool code — only `MCP_TRANSPORT` changes.
 | Tool | Arguments | Returns |
 | --- | --- | --- |
 | `explore_schema` | `table_name?`, `include_sample_data=false`, `name_pattern?`, `detail=false`, `limit=200`, `offset=0` | A table listing with column counts, or one table's columns, PK, FKs, indexes, row count, and up to 3 sample rows |
-| `execute_query` | `sql`, `row_limit=100` (max 1000) | `columns`, `rows`, `count` for one validated `SELECT` |
+| `execute_query` | `sql`, `row_limit=100` (max 1000) | `columns`, `rows`, `count`, `truncated`, and the effective `row_limit` for one validated `SELECT` |
 | `explain_query` | `sql` | Native execution plan plus the resolved `dialect` |
 | `validate_schema` | `table_name?` | Schema issues with `severity`, `code`, `message`, `suggestion` |
 | `suggest_index` | `query?` **xor** `table_name?` | `CREATE INDEX` recommendations with reasons |
@@ -130,6 +130,8 @@ Every `execute_query`, `explain_query`, and `suggest_index` call routes through 
   This is matched as a **clause**, not as a keyword, and the distinction is the point. `SHARE` alone is a legal column name — `sqlparse` types the `share` in `SELECT share FROM cap_table` as a `Keyword` — so adding `SHARE` to the denylist above would reject a real query. A flat set of words is the wrong shape for a rule about multi-word clauses, so [safety.py](safety.py) collects the keyword sequence and matches `FOR [NO] [KEY] UPDATE|SHARE` against it. A `FOR` belonging to something else (`FOR XML`, `FOR JSON`, `FOR SYSTEM_TIME`) falls through, because its target is not a lock strength.
 
 Every query that passes is wrapped as `SELECT * FROM (<your query>) AS limited_query LIMIT <row_limit>`, so an unbounded scan cannot flood the client's context. The wrap is unconditional: a `LIMIT` in your own query narrows the inner result, but `row_limit` still caps what comes back, so `LIMIT 500` with the default `row_limit` returns 100 rows. `row_limit` is itself clamped to 1000, so raising it cannot defeat the guard.
+
+The cap is never silent. The wrapper actually asks for `row_limit + 1` rows; if the extra one comes back it is dropped and the result carries `"truncated": true`, so the client can tell "that is all the data" from "there is more" instead of reporting a capped set as complete. The result also returns the effective `row_limit`, which shows when a request above 1000 was clamped.
 
 Validation is only the first of three layers, because a keyword blocklist cannot see a query that is syntactically fine and still harmful:
 

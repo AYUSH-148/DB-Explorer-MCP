@@ -73,6 +73,8 @@ def test_execute_query_tool_returns_rows(configured_engine, monkeypatch):
         "columns": ["name"],
         "rows": [{"name": "Alice"}],
         "count": 1,
+        "truncated": False,
+        "row_limit": 100,
     }
 
 

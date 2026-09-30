@@ -190,6 +190,8 @@ def test_row_limit_is_clamped_to_the_maximum(
     result = execute_safe(engine, "SELECT * FROM users", row_limit=10_000_000)
 
     assert result["count"] == 3
+    assert result["row_limit"] == 3
+    assert result["truncated"] is True
 
 
 def test_default_row_limit_maximum_is_a_context_sized_bound():
@@ -207,6 +209,21 @@ def test_row_limit_below_the_maximum_is_untouched(tmp_path: Path):
     result = execute_safe(engine, "SELECT * FROM users", row_limit=5)
 
     assert result["count"] == 5
+    assert result["truncated"] is True
+
+
+def test_result_that_fits_the_limit_is_not_truncated(tmp_path: Path):
+    """A result exactly as long as row_limit is complete, not capped: the
+    extra probe row is what tells the two apart."""
+    database_path = tmp_path / "sample.db"
+    create_sample_database(database_path)
+    engine = create_engine(f"sqlite:///{database_path}")
+    total = execute_safe(engine, "SELECT * FROM users")["count"]
+
+    result = execute_safe(engine, "SELECT * FROM users", row_limit=total)
+
+    assert result["count"] == total
+    assert result["truncated"] is False
 
 
 @pytest.mark.parametrize("row_limit", [0, -1])
