@@ -27,7 +27,9 @@ def test_validate_migration_never_executes_scripts(tmp_path: Path):
         "ALTER TABLE users DROP COLUMN active;",
     )
 
-    assert result["valid"] is True
+    assert "valid" not in result
+    assert result["up"]["statement_types"] == ["ALTER"]
+    assert result["down"]["statement_types"] == ["ALTER"]
     assert result["execution_note"] == "Not executed. Review and run manually."
 
 
