@@ -7,7 +7,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ```powershell
 uv sync                                # install deps
 uv run python tests/seed_test_db.py    # (re)create sample.db
-uv run pytest                          # run all 212 tests
+uv run pytest                          # run all 213 tests
 uv run pytest tests/test_safety.py     # run one test file
 uv run pytest tests/test_safety.py::test_name -v   # run a single test
 uv run server.py                       # start server, stdio transport
@@ -30,7 +30,7 @@ Safety validation is layer one of three — `db.py` adds a statement timeout (`Q
 **Module split** (each tool in `server.py` is a thin `@mcp.tool` wrapper delegating to a plain function that takes an `Engine`, so everything is testable against a temp SQLite DB with no MCP client involved):
 - `safety.py` — the trust boundary described above
 - `db.py` — engine construction, timeouts, read-only transaction setup
-- `inspector.py` — schema reflection (columns, PK, FKs, indexes, row counts, samples) via SQLAlchemy `inspect()`
+- `inspector.py` — schema reflection (columns, PK, FKs, indexes, row counts, samples) via SQLAlchemy `inspect()`. Lists views and materialized views alongside tables, each tagged with a `kind`
 - `explain.py` — dialect-aware `EXPLAIN` / `EXPLAIN QUERY PLAN`
 - `index_suggest.py` — index recommendations from a live plan (SQLite-tuned) or FK metadata (works on every dialect)
 - `schema_health.py` — objective schema audit (`missing_primary_key`, `unindexed_foreign_key`, `wide_table`, `no_indexes`)
@@ -45,4 +45,4 @@ Transports (stdio vs. streamable-http) run identical tool code; only `MCP_TRANSP
 
 ## Testing notes
 
-All 212 tests run against a temporary SQLite database — no credentials, no running server, no network. SQLite can't produce the driver types that matter for correctness (no `NUMERIC`, returns `str`/`int` for nearly everything), so `tests/test_serialization.py` exercises `Decimal`/`datetime`/`UUID`/binary directly rather than through a query. There is currently no PostgreSQL/MySQL test path.
+All 213 tests run against a temporary SQLite database — no credentials, no running server, no network. SQLite can't produce the driver types that matter for correctness (no `NUMERIC`, returns `str`/`int` for nearly everything), so `tests/test_serialization.py` exercises `Decimal`/`datetime`/`UUID`/binary directly rather than through a query. There is currently no PostgreSQL/MySQL test path.

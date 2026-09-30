@@ -13,7 +13,7 @@ from collections.abc import Sequence
 from typing import Any, NamedTuple
 
 from sqlalchemy import Connection, Engine, inspect, text
-from sqlalchemy.engine.reflection import Inspector
+from sqlalchemy.engine.reflection import Inspector, ObjectKind
 
 from db import read_only_connection
 from errors import ToolInputError, table_not_found
@@ -35,6 +35,7 @@ class _Page(NamedTuple):
     """One page of table names, plus the bounds that produced it."""
 
     names: list[str]
+    kinds: dict[str, str]
     total: int
     limit: int | None
     offset: int
@@ -61,6 +62,24 @@ def _matches(table_name: str, pattern: str) -> bool:
     return fnmatch.fnmatchcase(table_name.lower(), lowered)
 
 
+def _relation_kinds(inspector: Inspector) -> dict[str, str]:
+    """Map every relation a query can select from to its kind.
+
+    Views are listed because execute_query reads them like tables; leaving them
+    out showed the caller a schema narrower than the one it could query.
+    """
+    kinds = {name: "view" for name in inspector.get_view_names()}
+    try:
+        kinds.update(
+            (name, "materialized_view")
+            for name in inspector.get_materialized_view_names()
+        )
+    except NotImplementedError:
+        pass  # Only some dialects (PostgreSQL, Oracle) have them.
+    kinds.update((name, "table") for name in inspector.get_table_names())
+    return kinds
+
+
 def _select_names(
     inspector: Inspector,
     name_pattern: str | None,
@@ -85,27 +104,31 @@ def _select_names(
             received=offset,
         )
 
-    names = sorted(inspector.get_table_names())
+    kinds = _relation_kinds(inspector)
+    names = sorted(kinds)
     if name_pattern:
         names = [name for name in names if _matches(name, name_pattern)]
 
     end = None if limit is None else offset + limit
-    return _Page(names[offset:end], len(names), limit, offset)
+    return _Page(names[offset:end], kinds, len(names), limit, offset)
 
 
 def _reflect(
     inspector: Inspector,
     table_names: Sequence[str],
 ) -> dict[str, dict[str, Any]]:
-    """Reflect a set of tables in four queries rather than four per table."""
+    """Reflect a set of tables in four queries rather than four per table.
+
+    ObjectKind.ANY includes views; the default kind silently drops them.
+    """
     if not table_names:
         return {}
 
-    filter_names = list(table_names)
-    columns = inspector.get_multi_columns(filter_names=filter_names)
-    primary_keys = inspector.get_multi_pk_constraint(filter_names=filter_names)
-    foreign_keys = inspector.get_multi_foreign_keys(filter_names=filter_names)
-    indexes = inspector.get_multi_indexes(filter_names=filter_names)
+    options = {"filter_names": list(table_names), "kind": ObjectKind.ANY}
+    columns = inspector.get_multi_columns(**options)
+    primary_keys = inspector.get_multi_pk_constraint(**options)
+    foreign_keys = inspector.get_multi_foreign_keys(**options)
+    indexes = inspector.get_multi_indexes(**options)
 
     return {
         name: {
@@ -118,9 +141,12 @@ def _reflect(
     }
 
 
-def _table_payload(table_name: str, reflected: dict[str, Any]) -> dict[str, Any]:
+def _table_payload(
+    table_name: str, kind: str, reflected: dict[str, Any]
+) -> dict[str, Any]:
     return {
         "name": table_name,
+        "kind": kind,
         "columns": [_column_info(column) for column in reflected["columns"]],
         "primary_key": reflected["primary_key"].get("constrained_columns", []),
         "foreign_keys": [
@@ -162,16 +188,22 @@ def get_schema_page(
 
         if detail:
             reflected = _reflect(inspector, page.names)
-            tables = [_table_payload(name, reflected[name]) for name in page.names]
+            tables = [
+                _table_payload(name, page.kinds[name], reflected[name])
+                for name in page.names
+            ]
         else:
             columns = (
-                inspector.get_multi_columns(filter_names=list(page.names))
+                inspector.get_multi_columns(
+                    filter_names=list(page.names), kind=ObjectKind.ANY
+                )
                 if page.names
                 else {}
             )
             tables = [
                 {
                     "name": name,
+                    "kind": page.kinds[name],
                     "column_count": len(columns.get((_DEFAULT_SCHEMA, name), [])),
                 }
                 for name in page.names
@@ -220,12 +252,12 @@ def get_table_detail(
     """Return details for one table, optionally including three sample rows."""
     with read_only_connection(engine) as connection:
         inspector = inspect(connection)
-        known_tables = inspector.get_table_names()
-        if table_name not in known_tables:
-            raise table_not_found(table_name, known_tables)
+        kinds = _relation_kinds(inspector)
+        if table_name not in kinds:
+            raise table_not_found(table_name, list(kinds))
 
         reflected = _reflect(inspector, [table_name])[table_name]
-        details = _table_payload(table_name, reflected)
+        details = _table_payload(table_name, kinds[table_name], reflected)
         details["row_count"] = _row_count(connection, table_name)
 
         if include_sample_data:

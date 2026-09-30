@@ -100,7 +100,7 @@ Both modes run identical tool code — only `MCP_TRANSPORT` changes.
 
 | Tool | Arguments | Returns |
 | --- | --- | --- |
-| `explore_schema` | `table_name?`, `include_sample_data=false`, `name_pattern?`, `detail=false`, `limit=200`, `offset=0` | A table listing with column counts, or one table's columns, PK, FKs, indexes, row count, and up to 3 sample rows |
+| `explore_schema` | `table_name?`, `include_sample_data=false`, `name_pattern?`, `detail=false`, `limit=200`, `offset=0` | A listing of tables and views (each with a `kind` and column count), or one relation's `kind`, columns, PK, FKs, indexes, row count, and up to 3 sample rows |
 | `execute_query` | `sql`, `row_limit=100` (max 1000) | `columns`, `rows`, `count`, `truncated`, and the effective `row_limit` for one validated `SELECT` |
 | `explain_query` | `sql` | Native execution plan plus the resolved `dialect` |
 | `validate_schema` | `table_name?` | Schema issues with `severity`, `code`, `message`, `suggestion` |
@@ -116,6 +116,8 @@ is, and small enough to read before picking a table. Row counts cost a `COUNT(*)
 so they arrive only with `table_name`. Narrow a large schema with `name_pattern` (`order`
 matches any name containing it, `order_*` is a glob), page with `limit`/`offset` (capped
 at 1000), and use `detail=true` to expand a whole page into columns, keys, and indexes.
+Views and materialized views are listed alongside tables, since `execute_query` can read
+them too; each entry's `kind` is `table`, `view`, or `materialized_view`.
 
 ## Safety model
 

@@ -1,7 +1,7 @@
 from pathlib import Path
 
 import pytest
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, text
 
 from inspector import (
     MAX_TABLE_LIMIT,
@@ -57,8 +57,8 @@ def test_schema_page_summarises_without_counting_rows(engine):
     page = get_schema_page(engine)
 
     assert page["tables"] == [
-        {"name": "orders", "column_count": 3},
-        {"name": "users", "column_count": 3},
+        {"name": "orders", "kind": "table", "column_count": 3},
+        {"name": "users", "kind": "table", "column_count": 3},
     ]
     assert page["total_matching_tables"] == 2
     assert page["has_more"] is False
@@ -133,6 +133,21 @@ def test_schema_page_detail_expands_the_page_without_row_counts(engine):
     assert orders["primary_key"] == ["id"]
     assert "row_count" not in orders
     assert "detail_hint" not in page
+
+
+def test_views_are_listed_and_described_like_tables(engine):
+    """execute_query can select from a view, so the schema must show it too."""
+    with engine.begin() as connection:
+        connection.execute(text("CREATE VIEW user_view AS SELECT name FROM users"))
+
+    page = get_schema_page(engine)
+    assert {"name": "user_view", "kind": "view", "column_count": 1} in page["tables"]
+
+    details = get_table_detail(engine, "user_view", include_sample_data=True)
+    assert details["kind"] == "view"
+    assert [column["name"] for column in details["columns"]] == ["name"]
+    assert details["row_count"] == 1
+    assert details["sample_rows"] == [{"name": "Alice"}]
 
 
 def test_get_all_tables_can_skip_row_counts(engine):
