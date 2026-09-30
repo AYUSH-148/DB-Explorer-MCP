@@ -58,7 +58,6 @@ def validate_migration(
 ) -> dict[str, Any]:
     """Validate migration scripts without executing either script."""
     return {
-        "valid": True,
         "dialect": engine.dialect.name,
         "up": {"sql": up_sql.strip(), "statement_types": _validate_script(up_sql, "UP")},
         "down": {
