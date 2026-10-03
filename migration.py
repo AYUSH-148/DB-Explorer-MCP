@@ -4,15 +4,26 @@ from sqlalchemy import Engine
 from sqlparse import parse
 
 from errors import ToolInputError
-from inspector import get_all_tables
+from inspector import DEFAULT_TABLE_LIMIT, get_schema_page
 from safety import has_comment
 
 
-def get_migration_context(engine: Engine) -> dict[str, Any]:
-    """Return schema and dialect context for client-side migration generation."""
+def get_migration_context(
+    engine: Engine,
+    name_pattern: str | None = None,
+    limit: int = DEFAULT_TABLE_LIMIT,
+    offset: int = 0,
+) -> dict[str, Any]:
+    """Return dialect and one page of full table detail for migration drafting.
+
+    Detail only: no row counts, since a COUNT(*) per table scans the database.
+    """
+    page = get_schema_page(
+        engine, name_pattern=name_pattern, limit=limit, offset=offset, detail=True
+    )
     return {
         "dialect": engine.dialect.name,
-        "tables": get_all_tables(engine),
+        **page,
         "execution_note": "Migration SQL is generated and run by the user, never by this server.",
     }
 

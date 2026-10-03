@@ -133,9 +133,13 @@ def suggest_index(
 
 @mcp.tool
 @tool_errors
-def migration_context() -> dict[str, Any]:
-    """Return schema context for client-side migration generation."""
-    return get_migration_context(engine)
+def migration_context(
+    name_pattern: str | None = None,
+    limit: int = DEFAULT_TABLE_LIMIT,
+    offset: int = 0,
+) -> dict[str, Any]:
+    """Return dialect and one page of table detail for client-side migration drafting."""
+    return get_migration_context(engine, name_pattern, limit, offset)
 
 
 @mcp.tool

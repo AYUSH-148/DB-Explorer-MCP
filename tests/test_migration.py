@@ -15,7 +15,32 @@ def test_migration_context_returns_dialect_and_schema(tmp_path: Path):
     result = get_migration_context(engine)
 
     assert result["dialect"] == "sqlite"
-    assert {table["name"] for table in result["tables"]} == {"users", "orders"}
+    assert [table["name"] for table in result["tables"]] == ["orders", "users"]
+    assert all("row_count" not in table for table in result["tables"])
+    orders = result["tables"][0]
+    assert orders["primary_key"] == ["id"]
+    assert orders["foreign_keys"] == [
+        {
+            "columns": ["user_id"],
+            "referred_table": "users",
+            "referred_columns": ["id"],
+        }
+    ]
+
+
+def test_migration_context_pages_like_explore_schema(tmp_path: Path):
+    database_path = tmp_path / "sample.db"
+    create_sample_database(database_path)
+    engine = create_engine(f"sqlite:///{database_path}")
+
+    first = get_migration_context(engine, limit=1)
+    assert [table["name"] for table in first["tables"]] == ["orders"]
+    assert first["has_more"] is True
+    second = get_migration_context(engine, limit=1, offset=first["next_offset"])
+    assert [table["name"] for table in second["tables"]] == ["users"]
+    assert second["has_more"] is False
+    matched = get_migration_context(engine, name_pattern="user")
+    assert [table["name"] for table in matched["tables"]] == ["users"]
 
 
 def test_validate_migration_never_executes_scripts(tmp_path: Path):

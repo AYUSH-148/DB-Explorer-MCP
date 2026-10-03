@@ -5,7 +5,6 @@ from sqlalchemy import create_engine, text
 
 from inspector import (
     MAX_TABLE_LIMIT,
-    get_all_tables,
     get_schema_page,
     get_table_detail,
 )
@@ -17,22 +16,6 @@ def engine(tmp_path: Path):
     database_path = tmp_path / "sample.db"
     create_sample_database(database_path)
     return create_engine(f"sqlite:///{database_path}")
-
-
-def test_get_all_tables_returns_schema_summary(engine):
-    tables = get_all_tables(engine)
-
-    assert [table["name"] for table in tables] == ["orders", "users"]
-    orders = next(table for table in tables if table["name"] == "orders")
-    assert orders["row_count"] == 1
-    assert orders["primary_key"] == ["id"]
-    assert orders["foreign_keys"] == [
-        {
-            "columns": ["user_id"],
-            "referred_table": "users",
-            "referred_columns": ["id"],
-        }
-    ]
 
 
 def test_get_table_detail_can_include_sample_rows(engine):
@@ -148,10 +131,3 @@ def test_views_are_listed_and_described_like_tables(engine):
     assert [column["name"] for column in details["columns"]] == ["name"]
     assert details["row_count"] == 1
     assert details["sample_rows"] == [{"name": "Alice"}]
-
-
-def test_get_all_tables_can_skip_row_counts(engine):
-    tables = get_all_tables(engine, include_row_counts=False)
-
-    assert [table["name"] for table in tables] == ["orders", "users"]
-    assert all("row_count" not in table for table in tables)

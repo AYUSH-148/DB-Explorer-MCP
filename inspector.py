@@ -3,7 +3,7 @@
 Two rules keep this cheap. One connection and one Inspector serve an entire call,
 and metadata for every table on the page arrives in one query per kind rather than
 one query per table. Row counts are the exception: COUNT(*) scans the whole table,
-so they are computed for a single named table, or when a caller opts in.
+so they are computed only for a single named table.
 """
 
 from __future__ import annotations
@@ -179,7 +179,6 @@ def get_schema_page(
     limit: int | None = DEFAULT_TABLE_LIMIT,
     offset: int = 0,
     detail: bool = False,
-    include_row_counts: bool = False,
 ) -> dict[str, Any]:
     """Return one page of tables, as a compact listing or with full detail."""
     with read_only_connection(engine) as connection:
@@ -209,10 +208,6 @@ def get_schema_page(
                 for name in page.names
             ]
 
-        if include_row_counts:
-            for table in tables:
-                table["row_count"] = _row_count(connection, table["name"])
-
     result: dict[str, Any] = {
         "tables": tables,
         "total_matching_tables": page.total,
@@ -229,19 +224,6 @@ def get_schema_page(
             "and row count."
         )
     return result
-
-
-def get_all_tables(
-    engine: Engine,
-    include_row_counts: bool = True,
-) -> list[dict[str, Any]]:
-    """Return full detail for every table in the database."""
-    return get_schema_page(
-        engine,
-        limit=None,
-        detail=True,
-        include_row_counts=include_row_counts,
-    )["tables"]
 
 
 def get_table_detail(

@@ -105,7 +105,7 @@ Both modes run identical tool code — only `MCP_TRANSPORT` changes.
 | `explain_query` | `sql` | Native execution plan plus the resolved `dialect` |
 | `validate_schema` | `table_name?` | Schema issues with `severity`, `code`, `message`, `suggestion` |
 | `suggest_index` | `query?` **xor** `table_name?` | `CREATE INDEX` recommendations with reasons |
-| `migration_context` | — | Dialect and full schema, for client-side migration drafting |
+| `migration_context` | `name_pattern?`, `limit=200`, `offset=0` | Dialect plus one page of columns, keys, and indexes (no row counts), for client-side migration drafting; pages like `explore_schema` |
 | `validate_migration` | `up_sql`, `down_sql` | Parsed statement types per script; **never executed** |
 
 `validate_schema` reports four codes: `missing_primary_key`, `unindexed_foreign_key`, `wide_table` (50+ columns), and `no_indexes`. A foreign key counts as indexed when any index, the primary key, or a unique constraint starts with its columns in order, so a one-to-one child keyed on its parent's id is not reported, and no `CREATE INDEX` is suggested that would duplicate an index the database already built. An index that cannot look rows up by value does not count: a partial index (`WHERE ...`), a PostgreSQL GIN, GiST or BRIN index, or a MySQL `FULLTEXT`/`SPATIAL` key. Suggested `CREATE INDEX` statements quote their names, so they run as written against a table called `order` or a PostgreSQL column called `"UserId"`. On MySQL the quotes are backticks, whatever the server's `sql_mode`, because a suggestion is pasted into another session and double quotes only name an identifier where `ANSI_QUOTES` is on.
