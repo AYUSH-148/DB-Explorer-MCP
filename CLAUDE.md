@@ -7,7 +7,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ```powershell
 uv sync                                # install deps
 uv run python tests/seed_test_db.py    # (re)create sample.db
-uv run pytest                          # run all 194 tests
+uv run pytest                          # run all 233 tests
 uv run pytest tests/test_safety.py     # run one test file
 uv run pytest tests/test_safety.py::test_name -v   # run a single test
 uv run server.py                       # start server, stdio transport
@@ -23,14 +23,14 @@ If `uv` isn't on `PATH`, prefix commands with `py -m`.
 
 This is an MCP server (`server.py`, FastMCP) exposing 7 read-only database tools (`explore_schema`, `execute_query`, `explain_query`, `validate_schema`, `suggest_index`, `migration_context`, `validate_migration`) over one shared SQLAlchemy engine. It makes no LLM calls itself — the MCP client's model writes the SQL; this server's only job is to make mutation structurally impossible before it reaches the driver.
 
-**Trust boundary is `safety.py`.** Every query-executing tool routes through it first. It parses SQL with `sqlparse` (never string-matches) and rejects anything that isn't exactly one `SELECT` statement, contains SQL comments, contains a blocked keyword, or contains a locking clause (`FOR UPDATE`/`SHARE` etc., matched as a multi-word clause sequence, not a keyword set — plain columns named `share` must still pass). A query that passes is unconditionally wrapped as `SELECT * FROM (<query>) AS limited_query LIMIT <row_limit>`, so a `LIMIT` inside the original query narrows the inner result but never removes the outer cap. `row_limit` is clamped to 1000. See the README's "Safety model" section for the full denylist rationale (which entries are load-bearing vs. defense-in-depth) before touching the keyword list.
+**Trust boundary is `safety.py`.** Every query-executing tool routes through it first. It parses SQL with `sqlparse` (never string-matches) and rejects anything that isn't exactly one `SELECT` statement, contains SQL comments, contains a blocked keyword, or contains a locking clause (`FOR UPDATE`/`SHARE` etc., matched as a multi-word clause sequence, not a keyword set — plain columns named `share` must still pass). A query that passes is unconditionally wrapped as `SELECT * FROM (\n<query>\n) AS limited_query LIMIT <row_limit + 1>` (the line breaks keep a comment the validator missed from swallowing the `LIMIT`), so a `LIMIT` inside the original query narrows the inner result but never removes the outer cap. The extra probe row is dropped and sets `truncated: true` in the result, so a capped result is never mistaken for a complete one. `row_limit` is clamped to 1000. See the README's "Safety model" section for the full denylist rationale (which entries are load-bearing vs. defense-in-depth) before touching the keyword list.
 
 Safety validation is layer one of three — `db.py` adds a statement timeout (`QUERY_TIMEOUT_SECONDS`, dialect-specific: `statement_timeout` on Postgres, `max_execution_time` on MySQL, progress-handler on SQLite) and runs reads inside a read-only transaction (`BEGIN READ ONLY` / `SET SESSION TRANSACTION READ ONLY` / `PRAGMA query_only`) so the database itself refuses writes, independent of the parser.
 
 **Module split** (each tool in `server.py` is a thin `@mcp.tool` wrapper delegating to a plain function that takes an `Engine`, so everything is testable against a temp SQLite DB with no MCP client involved):
 - `safety.py` — the trust boundary described above
 - `db.py` — engine construction, timeouts, read-only transaction setup
-- `inspector.py` — schema reflection (columns, PK, FKs, indexes, row counts, samples) via SQLAlchemy `inspect()`
+- `inspector.py` — schema reflection (columns, PK, FKs, indexes, row counts, samples) via SQLAlchemy `inspect()`. Lists views and materialized views alongside tables, each tagged with a `kind`
 - `explain.py` — dialect-aware `EXPLAIN` / `EXPLAIN QUERY PLAN`
 - `index_suggest.py` — index recommendations from a live plan (SQLite-tuned) or FK metadata (works on every dialect)
 - `schema_health.py` — objective schema audit (`missing_primary_key`, `unindexed_foreign_key`, `wide_table`, `no_indexes`)
@@ -45,4 +45,4 @@ Transports (stdio vs. streamable-http) run identical tool code; only `MCP_TRANSP
 
 ## Testing notes
 
-All 194 tests run against a temporary SQLite database — no credentials, no running server, no network. SQLite can't produce the driver types that matter for correctness (no `NUMERIC`, returns `str`/`int` for nearly everything), so `tests/test_serialization.py` exercises `Decimal`/`datetime`/`UUID`/binary directly rather than through a query. There is currently no PostgreSQL/MySQL test path.
+All 233 tests run against a temporary SQLite database — no credentials, no running server, no network. SQLite can't produce the driver types that matter for correctness (no `NUMERIC`, returns `str`/`int` for nearly everything), so `tests/test_serialization.py` exercises `Decimal`/`datetime`/`UUID`/binary directly rather than through a query. There is currently no PostgreSQL/MySQL test path.

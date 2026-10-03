@@ -36,3 +36,34 @@ def test_validate_migration_rejects_select(tmp_path: Path):
 
     with pytest.raises(ValueError, match="must not contain SELECT"):
         validate_migration(engine, "SELECT * FROM users", "DROP TABLE users")
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        "ALTER TABLE users ADD COLUMN note TEXT DEFAULT 'a--b'",
+        "ALTER TABLE users ADD COLUMN note TEXT DEFAULT '/* x */'",
+        'ALTER TABLE users ADD COLUMN "a--b" TEXT',
+    ],
+)
+def test_validate_migration_allows_comment_markers_inside_literals(tmp_path: Path, script: str):
+    engine = create_engine(f"sqlite:///{tmp_path / 'sample.db'}")
+
+    assert validate_migration(engine, script, "DROP TABLE t")["valid"] is True
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        "DROP TABLE t -- x",
+        "DROP TABLE t /* x */",
+        "DROP TABLE t /* open",
+        "DROP TABLE t */",
+        "ALTER TABLE t ADD COLUMN a TEXT DEFAULT 'x' -- 'y'",
+    ],
+)
+def test_validate_migration_rejects_real_comments(tmp_path: Path, script: str):
+    engine = create_engine(f"sqlite:///{tmp_path / 'sample.db'}")
+
+    with pytest.raises(ValueError, match="comments are not allowed"):
+        validate_migration(engine, script, "DROP TABLE t")

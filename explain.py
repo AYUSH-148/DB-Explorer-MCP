@@ -10,7 +10,7 @@ from serialization import jsonable_rows
 
 def explain_safe(engine: Engine, sql: str) -> dict[str, Any]:
     """Return the database execution plan for one safe SELECT query."""
-    is_safe, reason = validate_query(sql)
+    is_safe, reason = validate_query(sql, engine.dialect.name)
     if not is_safe:
         raise unsafe_query(reason)
 

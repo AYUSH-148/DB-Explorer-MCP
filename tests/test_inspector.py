@@ -1,7 +1,7 @@
 from pathlib import Path
 
 import pytest
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, text
 
 from inspector import (
     MAX_TABLE_LIMIT,
@@ -57,8 +57,8 @@ def test_schema_page_summarises_without_counting_rows(engine):
     page = get_schema_page(engine)
 
     assert page["tables"] == [
-        {"name": "orders", "column_count": 3},
-        {"name": "users", "column_count": 3},
+        {"name": "orders", "kind": "table", "column_count": 3},
+        {"name": "users", "kind": "table", "column_count": 3},
     ]
     assert page["total_matching_tables"] == 2
     assert page["has_more"] is False
@@ -135,8 +135,67 @@ def test_schema_page_detail_expands_the_page_without_row_counts(engine):
     assert "detail_hint" not in page
 
 
+def test_views_are_listed_and_described_like_tables(engine):
+    """execute_query can select from a view, so the schema must show it too."""
+    with engine.begin() as connection:
+        connection.execute(text("CREATE VIEW user_view AS SELECT name FROM users"))
+
+    page = get_schema_page(engine)
+    assert {"name": "user_view", "kind": "view", "column_count": 1} in page["tables"]
+
+    details = get_table_detail(engine, "user_view", include_sample_data=True)
+    assert details["kind"] == "view"
+    assert [column["name"] for column in details["columns"]] == ["name"]
+    # A view's count would run the view's whole query.
+    assert "row_count" not in details
+    assert details["sample_rows"] == [{"name": "Alice"}]
+
+
 def test_get_all_tables_can_skip_row_counts(engine):
     tables = get_all_tables(engine, include_row_counts=False)
 
     assert [table["name"] for table in tables] == ["orders", "users"]
     assert all("row_count" not in table for table in tables)
+
+
+def _break_a_view(engine) -> None:
+    """Leave a view whose base table no longer exists."""
+    with engine.begin() as connection:
+        connection.execute(text("CREATE TABLE base (a INTEGER)"))
+        connection.execute(text("CREATE VIEW broken_view AS SELECT a FROM base"))
+        connection.execute(text("DROP TABLE base"))
+
+
+@pytest.mark.parametrize("detail", [False, True])
+def test_one_broken_view_does_not_hide_the_other_tables(engine, detail):
+    _break_a_view(engine)
+
+    page = get_schema_page(engine, detail=detail)
+
+    tables = {table["name"]: table for table in page["tables"]}
+    assert tables["broken_view"]["kind"] == "view"
+    assert "base table" in tables["broken_view"]["error"]
+    assert tables["users"]["kind"] == "table"
+    assert "error" not in tables["users"]
+    assert "error" not in tables["orders"]
+
+
+def test_a_broken_view_asked_for_by_name_reports_instead_of_raising(engine):
+    _break_a_view(engine)
+
+    details = get_table_detail(engine, "broken_view", include_sample_data=True)
+
+    assert details["kind"] == "view"
+    assert "error" in details
+    assert "row_count" not in details
+    assert "sample_rows" not in details
+
+
+def test_row_counts_are_taken_for_tables_and_not_for_views(engine):
+    with engine.begin() as connection:
+        connection.execute(text("CREATE VIEW user_view AS SELECT name FROM users"))
+
+    tables = {table["name"]: table for table in get_all_tables(engine)}
+
+    assert tables["users"]["row_count"] == 1
+    assert "row_count" not in tables["user_view"]

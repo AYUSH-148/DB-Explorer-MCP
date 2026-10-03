@@ -29,7 +29,7 @@ def test_explore_schema_tool_defaults_to_a_summary(configured_engine, monkeypatc
 
     result = server.explore_schema_data()
 
-    assert result["tables"][0] == {"name": "orders", "column_count": 3}
+    assert result["tables"][0] == {"name": "orders", "kind": "table", "column_count": 3}
     assert result["limit"] == server.DEFAULT_TABLE_LIMIT
     assert result["detail_hint"]
 
@@ -73,6 +73,8 @@ def test_execute_query_tool_returns_rows(configured_engine, monkeypatch):
         "columns": ["name"],
         "rows": [{"name": "Alice"}],
         "count": 1,
+        "truncated": False,
+        "row_limit": 100,
     }
 
 
