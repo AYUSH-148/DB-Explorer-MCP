@@ -9,11 +9,12 @@ so they are computed for a single named table, or when a caller opts in.
 from __future__ import annotations
 
 import fnmatch
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from typing import Any, NamedTuple
 
 from sqlalchemy import Connection, Engine, inspect, text
 from sqlalchemy.engine.reflection import Inspector, ObjectKind
+from sqlalchemy.exc import SQLAlchemyError
 
 from db import read_only_connection
 from errors import ToolInputError, table_not_found
@@ -29,6 +30,11 @@ _WILDCARDS = "*?["
 # Reflection is keyed by (schema, table). Multi-schema support is not wired up yet,
 # so every lookup uses the default schema.
 _DEFAULT_SCHEMA: str | None = None
+
+_UNREADABLE = (
+    "Could not read this relation's columns. A view whose base table was "
+    "dropped or renamed does this."
+)
 
 
 class _Page(NamedTuple):
@@ -113,7 +119,57 @@ def _select_names(
     return _Page(names[offset:end], kinds, len(names), limit, offset)
 
 
+def _batched(
+    names: Sequence[str],
+    fetch: Callable[[Sequence[str]], dict[str, Any]],
+) -> dict[str, Any]:
+    """Fetch metadata for many relations in one go, or one at a time if that fails.
+
+    One unreadable relation, such as a view whose base table was dropped, fails
+    the whole batched query and would take every healthy relation's listing with
+    it. Retrying singly confines the failure to the relation that has it, which
+    maps to None. `fetch` must return an entry for every name it is given.
+    ponytail: no savepoint, so on Postgres a failed statement aborts the
+    transaction and the retries fail as well. Postgres refuses to drop a table
+    that a view depends on, so a broken view should not occur there.
+    """
+    try:
+        return fetch(names)
+    except SQLAlchemyError:
+        pass
+    results: dict[str, Any] = {}
+    for name in names:
+        try:
+            results.update(fetch([name]))
+        except SQLAlchemyError:
+            results[name] = None
+    return results
+
+
+def _column_lists(
+    inspector: Inspector,
+    names: Sequence[str],
+) -> dict[str, list[dict[str, Any]] | None]:
+    def fetch(batch: Sequence[str]) -> dict[str, Any]:
+        found = inspector.get_multi_columns(
+            filter_names=list(batch), kind=ObjectKind.ANY
+        )
+        return {name: found.get((_DEFAULT_SCHEMA, name), []) for name in batch}
+
+    return _batched(names, fetch) if names else {}
+
+
 def _reflect(
+    inspector: Inspector,
+    table_names: Sequence[str],
+) -> dict[str, dict[str, Any] | None]:
+    """Reflect a set of tables, mapping any that cannot be read to None."""
+    if not table_names:
+        return {}
+    return _batched(table_names, lambda names: _reflect_batch(inspector, names))
+
+
+def _reflect_batch(
     inspector: Inspector,
     table_names: Sequence[str],
 ) -> dict[str, dict[str, Any]]:
@@ -121,9 +177,6 @@ def _reflect(
 
     ObjectKind.ANY includes views; the default kind silently drops them.
     """
-    if not table_names:
-        return {}
-
     options = {"filter_names": list(table_names), "kind": ObjectKind.ANY}
     columns = inspector.get_multi_columns(**options)
     primary_keys = inspector.get_multi_pk_constraint(**options)
@@ -142,8 +195,10 @@ def _reflect(
 
 
 def _table_payload(
-    table_name: str, kind: str, reflected: dict[str, Any]
+    table_name: str, kind: str, reflected: dict[str, Any] | None
 ) -> dict[str, Any]:
+    if reflected is None:
+        return {"name": table_name, "kind": kind, "error": _UNREADABLE}
     return {
         "name": table_name,
         "kind": kind,
@@ -193,25 +248,25 @@ def get_schema_page(
                 for name in page.names
             ]
         else:
-            columns = (
-                inspector.get_multi_columns(
-                    filter_names=list(page.names), kind=ObjectKind.ANY
-                )
-                if page.names
-                else {}
-            )
+            columns = _column_lists(inspector, page.names)
             tables = [
-                {
+                {"name": name, "kind": page.kinds[name], "error": _UNREADABLE}
+                if columns[name] is None
+                else {
                     "name": name,
                     "kind": page.kinds[name],
-                    "column_count": len(columns.get((_DEFAULT_SCHEMA, name), [])),
+                    "column_count": len(columns[name]),
                 }
                 for name in page.names
             ]
 
         if include_row_counts:
+            # Tables only. COUNT(*) over a view runs the view's whole query, so one
+            # expensive view could time out a listing of every table, and a
+            # Postgres materialized view created WITH NO DATA refuses to be read.
             for table in tables:
-                table["row_count"] = _row_count(connection, table["name"])
+                if table["kind"] == "table":
+                    table["row_count"] = _row_count(connection, table["name"])
 
     result: dict[str, Any] = {
         "tables": tables,
@@ -258,7 +313,12 @@ def get_table_detail(
 
         reflected = _reflect(inspector, [table_name])[table_name]
         details = _table_payload(table_name, kinds[table_name], reflected)
-        details["row_count"] = _row_count(connection, table_name)
+        if reflected is None:
+            return details
+        # No count for a view: it would run the view's whole query and could time
+        # out the one call that exists to show the structure.
+        if kinds[table_name] == "table":
+            details["row_count"] = _row_count(connection, table_name)
 
         if include_sample_data:
             quoted = connection.dialect.identifier_preparer.quote(table_name)

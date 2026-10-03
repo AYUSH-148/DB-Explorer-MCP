@@ -1,9 +1,10 @@
 import re
+from collections.abc import Iterable
 from typing import Any
 
 from sqlalchemy import Engine, text
 from sqlparse import parse
-from sqlparse.sql import Statement
+from sqlparse.sql import Statement, Token
 from sqlparse.tokens import Comment, DDL, DML, Keyword, Literal
 from db import read_only_connection
 from errors import ToolInputError, unsafe_query
@@ -82,8 +83,32 @@ def _locking_clause(keywords: list[str]) -> str | None:
 
 _COMMENT_MARKERS = ("--", "/*", "*/")
 # A bare "#hi" lexes as a Name, not a Comment, yet MySQL treats it as one. Only
-# the SELECT-only path adds it: in migrations "#" is legitimate (SQL Server #temp).
-_QUERY_COMMENT_MARKERS = _COMMENT_MARKERS + ("#",)
+# the SELECT-only path adds it, and only where "#" can start a comment. Elsewhere
+# it is legal SQL: Postgres #>>, SQL Server #temp, Oracle emp#.
+_HASH_COMMENT_DIALECTS = frozenset({"mysql", "mariadb"})
+
+
+def _query_markers(dialect: str | None) -> tuple[str, ...]:
+    # A caller that cannot name its dialect gets the strict rule, not the lenient one.
+    if dialect is None or dialect in _HASH_COMMENT_DIALECTS:
+        return _COMMENT_MARKERS + ("#",)
+    return _COMMENT_MARKERS
+
+
+def _has_comment(tokens: Iterable[Token], markers: tuple[str, ...]) -> bool:
+    """Search flattened tokens for comments; see has_comment."""
+    parts = []
+    for token in tokens:
+        if token.ttype in Comment:
+            return True
+        quoted = (
+            token.ttype in Literal
+            or token.value.startswith("`")
+            or (token.value.startswith("[") and token.value.endswith("]"))
+        )
+        parts.append(" " if quoted else token.value)
+    code = "".join(parts)
+    return any(marker in code for marker in markers)
 
 
 def has_comment(statement: Statement, markers: tuple[str, ...] = _COMMENT_MARKERS) -> bool:
@@ -91,22 +116,19 @@ def has_comment(statement: Statement, markers: tuple[str, ...] = _COMMENT_MARKER
 
     Real comments lex as Comment tokens. An unterminated "/*" does not: it lexes
     as the separate tokens "/" and "*". So the non-literal tokens are also
-    rejoined and searched for the markers. Literals and backtick names are
-    masked with a space so their contents are never searched and the tokens
-    around them cannot fuse into a marker.
+    rejoined and searched for the markers. Literals, backtick names and [bracket]
+    names are masked with a space so their contents are never searched and the
+    tokens around them cannot fuse into a marker.
     """
-    parts = []
-    for token in statement.flatten():
-        if token.ttype in Comment:
-            return True
-        quoted = token.ttype in Literal or token.value.startswith("`")
-        parts.append(" " if quoted else token.value)
-    code = "".join(parts)
-    return any(marker in code for marker in markers)
+    return _has_comment(statement.flatten(), markers)
 
 
-def validate_query(sql: str) -> tuple[bool, str]:
-    """Return whether SQL contains exactly one safe read-only statement."""
+def validate_query(sql: str, dialect: str | None = None) -> tuple[bool, str]:
+    """Return whether SQL contains exactly one safe read-only statement.
+
+    `dialect` is the SQLAlchemy dialect name. It only decides whether a "#" is
+    read as a comment; None means the strictest reading.
+    """
     if not isinstance(sql, str) or not sql.strip():
         return False, "SQL query is required"
 
@@ -119,13 +141,14 @@ def validate_query(sql: str) -> tuple[bool, str]:
         statement_type = statement.get_type() or "UNKNOWN"
         return False, f"Only SELECT queries are allowed. Got: {statement_type}"
 
-    if has_comment(statement, _QUERY_COMMENT_MARKERS):
+    tokens = list(statement.flatten())
+    if _has_comment(tokens, _query_markers(dialect)):
         return False, "SQL comments are not allowed"
 
     # Keywords are collected in order so the clause check below can look at
     # sequences rather than single words.
     keywords: list[str] = []
-    for token in statement.flatten():
+    for token in tokens:
         if token.ttype in (DML, DDL, Keyword):
             keywords.append(token.value.upper())
 
@@ -145,22 +168,42 @@ def validate_query(sql: str) -> tuple[bool, str]:
 _RELABEL = re.compile(r"(.+):\d+")
 
 
+def _labels(columns: list[str]) -> list[str]:
+    """Give every column a distinct label, since a row is keyed by column name.
+
+    SQLite relabels a repeated name inside the row-cap wrapper (id, id:1) but
+    Postgres keeps both as "id", and a dict keyed by name would drop all but the
+    last value. Relabelling the same way here keeps every value and makes the
+    labels agree across databases.
+    ponytail: a label that collides with a real column ("id", "id", "id:1") is
+    not disambiguated further.
+    """
+    seen: dict[str, int] = {}
+    labels = []
+    for name in columns:
+        count = seen.get(name, 0)
+        seen[name] = count + 1
+        labels.append(name if count == 0 else f"{name}:{count}")
+    return labels
+
+
 def _repeated_names(columns: list[str]) -> list[str]:
     """Names that appear more than once in a result, in order of first repeat.
 
-    The row-cap wrapper is a derived table, and the driver or SQLAlchemy
-    relabels a repeated name there (id, id:1) so no row key is lost.
+    Reads labels as _labels or SQLite produce them: a repeat is a "name:N" whose
+    name came earlier. Names compare case-insensitively because SQLite does, so
+    `1 AS id, 2 AS ID` comes back as id, ID:1.
     ponytail: a real column literally named like "id:1" beside "id" is
     reported too; the column list carries nothing that tells them apart.
     """
-    repeated: list[str] = []
-    for position, label in enumerate(columns):
-        earlier = columns[:position]
+    seen: set[str] = set()
+    repeated: dict[str, str] = {}
+    for label in columns:
         relabel = _RELABEL.fullmatch(label)
-        name = relabel[1] if relabel and relabel[1] in earlier else label
-        if name in earlier and name not in repeated:
-            repeated.append(name)
-    return repeated
+        if relabel and relabel[1].lower() in seen:
+            repeated.setdefault(relabel[1].lower(), relabel[1])
+        seen.add(label.lower())
+    return list(repeated.values())
 
 
 def execute_safe(
@@ -181,7 +224,7 @@ def execute_safe(
     # it can act on.
     row_limit = min(row_limit, MAX_ROW_LIMIT)
 
-    is_safe, reason = validate_query(sql)
+    is_safe, reason = validate_query(sql, engine.dialect.name)
     if not is_safe:
         raise unsafe_query(reason)
 
@@ -189,13 +232,21 @@ def execute_safe(
     # accept one belonging to a subquery and leave the result set unbounded.
     # One extra row is fetched so a capped result can be told apart from a
     # complete one; without it the caller would report a partial set as whole.
+    #
+    # Each side of the query gets its own line. The validator and the database can
+    # disagree about where a string ends (sqlparse reads \' as an escaped quote,
+    # SQLite and Postgres do not), so a "--" it took for text may be a comment to
+    # the database. A comment ends at its line break, so it can no longer swallow
+    # the closing paren and the LIMIT.
     inner_query = sql.strip().rstrip(";")
-    query = f"SELECT * FROM ({inner_query}) AS limited_query LIMIT {row_limit + 1}"
+    query = (
+        f"SELECT * FROM (\n{inner_query}\n) AS limited_query LIMIT {row_limit + 1}"
+    )
 
     with read_only_connection(engine) as connection:
         result = connection.execute(text(query))
-        rows = jsonable_rows(result.mappings())
-        columns = list(result.keys())
+        columns = _labels(list(result.keys()))
+        rows = jsonable_rows(dict(zip(columns, row)) for row in result.fetchall())
 
     truncated = len(rows) > row_limit
     rows = rows[:row_limit]

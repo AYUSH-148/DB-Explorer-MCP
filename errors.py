@@ -5,12 +5,15 @@ carries a code the client can branch on and a hint the caller can follow.
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Sequence
 from difflib import get_close_matches
 from typing import Any
 
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.exc import TimeoutError as PoolTimeoutError
+
+logger = logging.getLogger(__name__)
 
 
 class ToolInputError(ValueError):
@@ -112,6 +115,11 @@ _TIMEOUT_MARKERS = (
     "canceling statement",
     "statement timeout",
     "max_execution_time",
+    # pymysql's read_timeout surfaces as error 2013, "Lost connection to MySQL
+    # server during query (timed out)", and SQLAlchemy flags that connection as
+    # invalidated. It is the query that was too slow, so it must be classed before
+    # the dropped-connection branch tells the caller to resend it unchanged.
+    "(timed out)",
 )
 
 _MISSING_OBJECT_MARKERS = (
@@ -121,6 +129,21 @@ _MISSING_OBJECT_MARKERS = (
     "unknown column",
     "unknown table",
 )
+
+
+def _database_unavailable(detail: str) -> ToolInputError:
+    # The driver text carries the host, IP and database user. The operator may read
+    # that; the caller of the tool may not, so it goes to the server log only.
+    logger.warning("Database unreachable: %s", detail)
+    return ToolInputError(
+        code="database_unavailable",
+        message="The server could not reach the database",
+        hint=(
+            "This is not a problem with your query. Retry it shortly, "
+            "unchanged; if it keeps failing, the server's DATABASE_URL or "
+            "network needs attention (the cause is in the server log)."
+        ),
+    )
 
 
 def from_database_error(
@@ -139,21 +162,12 @@ def from_database_error(
             message="Every database connection is in use; no query was run",
             hint="This is not a problem with your query. Retry it shortly, unchanged.",
         )
-    # SQLAlchemy leaves statement unset when the failure came from connecting,
-    # and flags connection_invalidated when the link dropped mid-statement.
-    if isinstance(error, DBAPIError) and (
-        error.statement is None or error.connection_invalidated
-    ):
-        return ToolInputError(
-            code="database_unavailable",
-            message=f"The server could not reach the database: {detail}",
-            hint=(
-                "This is not a problem with your query. Retry it shortly, "
-                "unchanged; if it keeps failing, the server's DATABASE_URL or "
-                "network needs attention."
-            ),
-        )
+    # SQLAlchemy leaves statement unset when the failure came from connecting.
+    if isinstance(error, DBAPIError) and error.statement is None:
+        return _database_unavailable(detail)
 
+    # Before the dropped-connection check: a client-side read timeout drops the
+    # connection too, but retrying the same slow query unchanged cannot work.
     if any(marker in lowered for marker in _TIMEOUT_MARKERS):
         bound = f" of {timeout_seconds}s" if timeout_seconds else ""
         return ToolInputError(
@@ -164,6 +178,10 @@ def from_database_error(
                 "smaller table. The timeout is set by QUERY_TIMEOUT_SECONDS."
             ),
         )
+
+    # SQLAlchemy flags connection_invalidated when the link dropped mid-statement.
+    if isinstance(error, DBAPIError) and error.connection_invalidated:
+        return _database_unavailable(detail)
 
     if "duplicate column name" in lowered:
         # MySQL refuses a derived table with repeated names, and every query
