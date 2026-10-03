@@ -116,9 +116,14 @@ def explain_query(sql: str) -> dict[str, Any]:
 
 @mcp.tool
 @tool_errors
-def validate_schema(table_name: str | None = None) -> dict[str, Any]:
-    """Check tables for missing primary keys and unindexed foreign keys."""
-    return validate_schema_data(engine, table_name)
+def validate_schema(
+    table_name: str | None = None,
+    name_pattern: str | None = None,
+    limit: int = DEFAULT_TABLE_LIMIT,
+    offset: int = 0,
+) -> dict[str, Any]:
+    """Check one table, or one page of tables, for schema issues."""
+    return validate_schema_data(engine, table_name, name_pattern, limit, offset)
 
 
 @mcp.tool

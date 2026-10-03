@@ -4,6 +4,7 @@ from sqlalchemy import Engine, inspect
 from sqlalchemy.engine.interfaces import Dialect
 from sqlalchemy.sql.compiler import IdentifierPreparer
 
+from db import read_only_connection
 from errors import ToolInputError, table_not_found
 from explain import explain_safe
 from indexes import reflect_coverage
@@ -47,16 +48,22 @@ def suggest_indexes(
 
     recommendations: list[dict[str, Any]] = []
     if table_name:
-        database_inspector = inspect(engine)
-        known_tables = database_inspector.get_table_names()
-        if table_name not in known_tables:
-            raise table_not_found(table_name, known_tables)
+        with read_only_connection(engine) as connection:
+            database_inspector = inspect(connection)
+            known_tables = database_inspector.get_table_names()
+            if table_name not in known_tables:
+                raise table_not_found(table_name, known_tables)
 
-        foreign_keys = database_inspector.get_foreign_keys(table_name)
-        # Coverage costs two more queries, and a table with no foreign keys has
-        # nothing for it to answer, so it is only reflected when there is one.
-        if foreign_keys:
-            coverage = reflect_coverage(database_inspector, [table_name])[table_name]
+            foreign_keys = database_inspector.get_foreign_keys(table_name)
+            # Coverage costs two more queries, and a table with no foreign keys
+            # has nothing for it to answer, so it is only reflected when there is one.
+            coverage = (
+                reflect_coverage(database_inspector, [table_name])[table_name]
+                if foreign_keys
+                else None
+            )
+
+        if coverage is not None:
             preparer = _paste_safe_preparer(engine.dialect)
             for foreign_key in foreign_keys:
                 columns = foreign_key.get("constrained_columns", [])

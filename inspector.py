@@ -80,13 +80,18 @@ def _relation_kinds(inspector: Inspector) -> dict[str, str]:
     return kinds
 
 
-def _select_names(
+def select_names(
     inspector: Inspector,
     name_pattern: str | None,
     limit: int | None,
     offset: int,
+    tables_only: bool = False,
 ) -> _Page:
-    """Return the page of table names a call should reflect."""
+    """Return the page of relation names a call should reflect.
+
+    tables_only leaves out views, for callers whose checks only make sense on a
+    table, such as a missing primary key.
+    """
     if limit is not None:
         if limit < 1:
             raise ToolInputError(
@@ -104,7 +109,10 @@ def _select_names(
             received=offset,
         )
 
-    kinds = _relation_kinds(inspector)
+    if tables_only:
+        kinds = {name: "table" for name in inspector.get_table_names()}
+    else:
+        kinds = _relation_kinds(inspector)
     names = sorted(kinds)
     if name_pattern:
         names = [name for name in names if _matches(name, name_pattern)]
@@ -183,7 +191,7 @@ def get_schema_page(
     """Return one page of tables, as a compact listing or with full detail."""
     with read_only_connection(engine) as connection:
         inspector = inspect(connection)
-        page = _select_names(inspector, name_pattern, limit, offset)
+        page = select_names(inspector, name_pattern, limit, offset)
 
         if detail:
             reflected = _reflect(inspector, page.names)
