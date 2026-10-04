@@ -33,7 +33,25 @@ def test_get_table_detail_rejects_unknown_table(engine):
 
 
 def test_get_table_detail_reports_row_count(engine):
-    assert get_table_detail(engine, "users")["row_count"] == 1
+    details = get_table_detail(engine, "users")
+    assert details["row_count"] == 1
+    assert details["row_count_capped"] is False
+
+
+def test_get_table_detail_caps_row_count(engine, monkeypatch):
+    # A full COUNT(*) on a huge table timed out and failed the whole call.
+    monkeypatch.setattr("inspector.ROW_COUNT_CAP", 2)
+    with engine.begin() as connection:
+        connection.execute(
+            text(
+                "INSERT INTO users (id, name, email) VALUES "
+                "(2, 'B', 'b@example.com'), (3, 'C', 'c@example.com')"
+            )
+        )
+
+    details = get_table_detail(engine, "users")
+    assert details["row_count"] == 2
+    assert details["row_count_capped"] is True
 
 
 def test_schema_page_summarises_without_counting_rows(engine):

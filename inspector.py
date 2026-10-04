@@ -2,8 +2,8 @@
 
 Two rules keep this cheap. One connection and one Inspector serve an entire call,
 and metadata for every table on the page arrives in one query per kind rather than
-one query per table. Row counts are the exception: COUNT(*) scans the whole table,
-so they are computed only for a single named table.
+one query per table. Row counts are the exception: they scan rows, so they are
+computed only for a single named table, and stop at ROW_COUNT_CAP.
 """
 
 from __future__ import annotations
@@ -23,6 +23,9 @@ from serialization import jsonable, jsonable_rows
 # one call cannot spend a whole context window on a listing.
 DEFAULT_TABLE_LIMIT = 200
 MAX_TABLE_LIMIT = 1000
+
+# Past this many rows, row_count reports the cap and row_count_capped is true.
+ROW_COUNT_CAP = 100_000
 
 _WILDCARDS = "*?["
 
@@ -176,9 +179,21 @@ def _table_payload(
     }
 
 
-def _row_count(connection: Connection, table_name: str) -> int:
+def _row_count(connection: Connection, table_name: str) -> tuple[int, bool]:
+    """Count rows up to ROW_COUNT_CAP; return (count, capped).
+
+    A bare COUNT(*) scans the whole table, so a billion-row table hit the statement
+    timeout and the call returned nothing, not even the columns already reflected.
+    Counting a LIMITed subquery stops the scan at the cap on every dialect.
+    """
     quoted = connection.dialect.identifier_preparer.quote(table_name)
-    return connection.execute(text(f"SELECT COUNT(*) FROM {quoted}")).scalar_one()
+    count = connection.execute(
+        text(
+            f"SELECT COUNT(*) FROM (SELECT 1 FROM {quoted} "
+            f"LIMIT {ROW_COUNT_CAP + 1}) AS capped"
+        )
+    ).scalar_one()
+    return min(count, ROW_COUNT_CAP), count > ROW_COUNT_CAP
 
 
 def get_schema_page(
@@ -248,7 +263,9 @@ def get_table_detail(
 
         reflected = _reflect(inspector, [table_name])[table_name]
         details = _table_payload(table_name, kinds[table_name], reflected)
-        details["row_count"] = _row_count(connection, table_name)
+        details["row_count"], details["row_count_capped"] = _row_count(
+            connection, table_name
+        )
 
         if include_sample_data:
             quoted = connection.dialect.identifier_preparer.quote(table_name)

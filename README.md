@@ -112,9 +112,10 @@ Both modes run identical tool code — only `MCP_TRANSPORT` changes.
 
 `explore_schema` is cheap by default and expensive only on request. With no arguments it
 returns table names and column counts — a handful of queries however wide the database
-is, and small enough to read before picking a table. Row counts cost a `COUNT(*)` scan,
-so they arrive only with `table_name`. Narrow a large schema with `name_pattern` (`order`
-matches any name containing it, `order_*` is a glob), page with `limit`/`offset` (capped
+is, and small enough to read before picking a table. Row counts cost a scan, so they
+arrive only with `table_name`, and stop at 100,000 rows: past that, `row_count` is
+100000 and `row_count_capped` is `true`, so a huge table never times out the call.
+Narrow a large schema with `name_pattern` (`order` matches any name containing it, `order_*` is a glob), page with `limit`/`offset` (capped
 at 1000), and use `detail=true` to expand a whole page into columns, keys, and indexes.
 Views and materialized views are listed alongside tables, since `execute_query` can read
 them too; each entry's `kind` is `table`, `view`, or `materialized_view`.
