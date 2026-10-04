@@ -1,5 +1,8 @@
+import logging
+
 import pytest
 from sqlalchemy.exc import OperationalError
+from sqlalchemy.exc import TimeoutError as PoolTimeoutError
 
 from errors import (
     ToolInputError,
@@ -133,3 +136,69 @@ def test_the_row_limit_wrapper_is_not_echoed_back_to_the_caller():
 
     assert error.message == "The database rejected the query: no such column: nope"
     assert "limited_query" not in error.as_text()
+
+
+def test_a_refused_connection_is_not_blamed_on_the_query():
+    # Raised while connecting, so SQLAlchemy has no statement to attach.
+    refused = OperationalError(None, None, Exception("Connection refused"))
+
+    error = from_database_error(refused)
+
+    assert error.code == "database_unavailable"
+    assert "not a problem with your query" in error.hint
+
+
+def test_a_connection_dropped_mid_query_is_not_blamed_on_the_query():
+    dropped = OperationalError(
+        "SELECT 1", {}, Exception("server closed the connection unexpectedly"),
+        connection_invalidated=True,
+    )
+
+    assert from_database_error(dropped).code == "database_unavailable"
+
+
+def test_an_exhausted_pool_is_reported_as_busy():
+    exhausted = PoolTimeoutError("QueuePool limit of size 5 overflow 10 reached")
+
+    error = from_database_error(exhausted)
+
+    assert error.code == "server_busy"
+    assert "Retry" in error.hint
+
+
+def test_a_duplicate_column_error_tells_the_caller_to_alias():
+    # MySQL raises this for the row-cap wrapper when a join repeats a name.
+    error = from_database_error(_operational_error("Duplicate column name 'id'"))
+
+    assert error.code == "sql_error"
+    assert "alias" in error.hint
+
+
+def test_a_mysql_read_timeout_is_a_slow_query_not_a_lost_connection():
+    # pymysql's read_timeout raises 2013 and SQLAlchemy marks the connection
+    # invalidated, so this used to be "retry unchanged" for a query that cannot finish.
+    timed_out = OperationalError(
+        "SELECT 1", {},
+        Exception("(2013, 'Lost connection to MySQL server during query (timed out)')"),
+        connection_invalidated=True,
+    )
+
+    error = from_database_error(timed_out, timeout_seconds=15)
+
+    assert error.code == "query_timeout"
+    assert "unchanged" not in error.hint
+
+
+def test_connection_details_are_logged_not_sent_to_the_caller(caplog):
+    refused = OperationalError(
+        None, None,
+        Exception('connection to server at "db.internal" (10.0.0.5), port 5432 failed'),
+    )
+
+    with caplog.at_level(logging.WARNING, logger="errors"):
+        error = from_database_error(refused)
+
+    assert error.code == "database_unavailable"
+    assert "db.internal" not in error.as_text()
+    assert "10.0.0.5" not in error.as_text()
+    assert "db.internal" in caplog.text

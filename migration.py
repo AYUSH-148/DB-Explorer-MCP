@@ -6,7 +6,7 @@ from sqlparse.tokens import Keyword, Punctuation
 
 from errors import ToolInputError
 from inspector import get_all_tables
-from safety import MYSQL_COMMENT_MARKERS, has_comment
+from safety import comment_markers, has_comment
 
 
 def get_migration_context(engine: Engine) -> dict[str, Any]:
@@ -41,11 +41,8 @@ def _validate_script(script: str, name: str, dialect: str) -> list[str]:
             hint="Send complete, semicolon-separated SQL statements.",
         )
 
-    mysql = dialect in ("mysql", "mariadb")
-    if any(
-        has_comment(statement, MYSQL_COMMENT_MARKERS) if mysql else has_comment(statement)
-        for statement in statements
-    ):
+    markers = comment_markers(dialect)
+    if any(has_comment(statement, markers) for statement in statements):
         raise ToolInputError(
             code="comments_not_allowed",
             message=f"{name} SQL comments are not allowed",

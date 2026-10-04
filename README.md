@@ -64,9 +64,9 @@ A typical `execute_query` call:
 1. **Client** turns the user's question into SQL, using schema it fetched earlier via `explore_schema`.
 2. **FastMCP** deserializes the tool call and validates arguments against the tool's type hints.
 3. **safety.py** parses the SQL with `sqlparse` — one statement, type `SELECT`, no comments, no blocked keywords. Failure raises before any connection is opened.
-4. **Row cap** applied: if the query has no `LIMIT`, it is wrapped in `SELECT * FROM (…) AS limited_query LIMIT row_limit`.
-5. **SQLAlchemy** executes it on a pooled connection and the rows are serialized to plain dicts.
-6. **Client** receives `{columns, rows, count}` as structured JSON and explains it in natural language.
+4. **Row cap** applied: the query is always wrapped in `SELECT * FROM (…) AS limited_query LIMIT row_limit + 1`.
+5. **SQLAlchemy** executes it on a pooled connection and the rows are serialized to plain dicts. The probe row, if present, is dropped and sets `truncated`.
+6. **Client** receives `{columns, rows, count, truncated, row_limit}` as structured JSON and explains it in natural language.
 
 Errors travel the same path in reverse: a raised `ValueError` becomes an MCP tool error, which the client surfaces to the user while the server keeps serving.
 
@@ -100,8 +100,8 @@ Both modes run identical tool code — only `MCP_TRANSPORT` changes.
 
 | Tool | Arguments | Returns |
 | --- | --- | --- |
-| `explore_schema` | `table_name?`, `include_sample_data=false`, `name_pattern?`, `detail=false`, `limit=200`, `offset=0` | A table listing with column counts, or one table's columns, PK, FKs, indexes, row count, and up to 3 sample rows |
-| `execute_query` | `sql`, `row_limit=100` (max 1000) | `columns`, `rows`, `count` for one validated `SELECT` |
+| `explore_schema` | `table_name?`, `include_sample_data=false`, `name_pattern?`, `detail=false`, `limit=200`, `offset=0` | A listing of tables and views (each with a `kind` and column count), or one relation's `kind`, columns, PK, FKs, indexes, row count, and up to 3 sample rows |
+| `execute_query` | `sql`, `row_limit=100` (max 1000) | `columns`, `rows`, `count`, `truncated`, and the effective `row_limit` for one validated `SELECT`; plus `duplicate_columns` and a `note` when a result repeats a column name (the repeats are labelled `id:1`, which is not valid SQL) |
 | `explain_query` | `sql` | Native execution plan plus the resolved `dialect` |
 | `validate_schema` | `table_name?` | Schema issues with `severity`, `code`, `message`, `suggestion` |
 | `suggest_index` | `query?` **xor** `table_name?` | `CREATE INDEX` recommendations with reasons |
@@ -113,9 +113,11 @@ Both modes run identical tool code — only `MCP_TRANSPORT` changes.
 `explore_schema` is cheap by default and expensive only on request. With no arguments it
 returns table names and column counts — a handful of queries however wide the database
 is, and small enough to read before picking a table. Row counts cost a `COUNT(*)` scan,
-so they arrive only with `table_name`. Narrow a large schema with `name_pattern` (`order`
+so they arrive only with `table_name`, and never for a view, whose count would run the view's whole query. Narrow a large schema with `name_pattern` (`order`
 matches any name containing it, `order_*` is a glob), page with `limit`/`offset` (capped
 at 1000), and use `detail=true` to expand a whole page into columns, keys, and indexes.
+Views and materialized views are listed alongside tables, since `execute_query` can read
+them too; each entry's `kind` is `table`, `view`, or `materialized_view`. A view whose base table was dropped cannot be read; it is listed with an `error` instead of failing the whole call.
 
 ## Safety model
 
@@ -123,13 +125,15 @@ Every `execute_query`, `explain_query`, and `suggest_index` call routes through 
 
 - **Single statement.** `SELECT 1; DROP TABLE users` → `Exactly one SQL statement is required`
 - **`SELECT` only**, determined from the parsed statement type rather than a string prefix → `Only SELECT queries are allowed. Got: DELETE`
-- **No SQL comments.** `--`, `/*`, `*/` are refused outright (outside string literals, so `'a--b'` still passes), closing the classic comment-smuggling route
+- **No SQL comments.** `--`, `/*`, `*/` are refused outright (outside string literals, quoted names and `[bracket]` names, so `'a--b'` still passes), closing the classic comment-smuggling route. `#` is refused too, but only on MySQL and MariaDB, where it starts a comment; elsewhere it is legal SQL (`#>>` on PostgreSQL, `#temp` on SQL Server)
 - **No blocked keywords** anywhere in the token stream: `ALTER`, `CREATE`, `DELETE`, `DROP`, `EXEC`, `EXECUTE`, `GRANT`, `INSERT`, `INTO`, `REVOKE`, `TRUNCATE`, `UPDATE`
 - **No locking clause.** `FOR UPDATE`, `FOR NO KEY UPDATE`, `FOR SHARE`, `FOR KEY SHARE` and MySQL's `LOCK IN SHARE MODE` are refused, because a locking read is not a read: it blocks other transactions from writing those rows. This one is defense in depth rather than a hole being closed — PostgreSQL 16 refuses both forms itself inside a read-only transaction (`cannot execute SELECT FOR SHARE in a read-only transaction`, verified). What the check adds is a rejection before a connection is opened, an error naming the clause and the fix instead of a generic driver message, and consistency: `FOR UPDATE` used to be refused only incidentally, because `UPDATE` is on the denylist for data-modifying CTEs.
 
   This is matched as a **clause**, not as a keyword, and the distinction is the point. `SHARE` alone is a legal column name — `sqlparse` types the `share` in `SELECT share FROM cap_table` as a `Keyword` — so adding `SHARE` to the denylist above would reject a real query. A flat set of words is the wrong shape for a rule about multi-word clauses, so [safety.py](safety.py) collects the keyword sequence and matches `FOR [NO] [KEY] UPDATE|SHARE` against it. A `FOR` belonging to something else (`FOR XML`, `FOR JSON`, `FOR SYSTEM_TIME`) falls through, because its target is not a lock strength.
 
-Every query that passes is wrapped as `SELECT * FROM (<your query>) AS limited_query LIMIT <row_limit>`, so an unbounded scan cannot flood the client's context. The wrap is unconditional: a `LIMIT` in your own query narrows the inner result, but `row_limit` still caps what comes back, so `LIMIT 500` with the default `row_limit` returns 100 rows. `row_limit` is itself clamped to 1000, so raising it cannot defeat the guard.
+Every query that passes is wrapped as `SELECT * FROM (<your query>) AS limited_query LIMIT <row_limit>`, so an unbounded scan cannot flood the client's context. The wrap is unconditional: a `LIMIT` in your own query narrows the inner result, but `row_limit` still caps what comes back, so `LIMIT 500` with the default `row_limit` returns 100 rows. `row_limit` is itself clamped to 1000, so raising it cannot defeat the guard. Your query sits on its own line between the parentheses, so a comment the database sees but the validator did not (the two disagree about where a string ends after a backslash-quote) stops at the line break instead of swallowing the closing paren and the `LIMIT`.
+
+The cap is never silent. The wrapper actually asks for `row_limit + 1` rows; if the extra one comes back it is dropped and the result carries `"truncated": true`, so the client can tell "that is all the data" from "there is more" instead of reporting a capped set as complete. The result also returns the effective `row_limit`, which shows when a request above 1000 was clamped.
 
 Validation is only the first of three layers, because a keyword blocklist cannot see a query that is syntactically fine and still harmful:
 
@@ -158,7 +162,8 @@ Hint: Add a WHERE clause, aggregate instead of scanning, or query a smaller tabl
 | --- | --- |
 | `table_not_found` | No such table. Carries the nearest matching names the database does have |
 | `sql_error` | The database rejected the query — a missing column, a type mismatch, bad syntax |
-| `query_timeout` | The statement hit `QUERY_TIMEOUT_SECONDS` and was cancelled |
+| `query_timeout` | The statement hit `QUERY_TIMEOUT_SECONDS` and was cancelled, including a MySQL client-side read timeout |
+| `database_unavailable` | The server could not reach the database, or the link dropped mid-query. The driver's text names the host and user, so it goes to the server log and not to the caller |
 | `unsafe_query` | Blocked by [safety.py](safety.py). The hint names the specific rule that fired |
 | `invalid_argument` | An argument out of range, such as `row_limit` below 1 |
 | `missing_argument` / `conflicting_arguments` | `suggest_index` needs exactly one of `query` or `table_name` |
@@ -175,7 +180,7 @@ Requires Python 3.11+ and [uv](https://docs.astral.sh/uv/).
 ```powershell
 uv sync
 uv run python tests/seed_test_db.py   # creates sample.db
-uv run pytest                         # 221 tests, no external database needed
+uv run pytest                         # 246 tests, no external database needed
 uv run server.py                      # stdio transport
 ```
 
@@ -315,7 +320,7 @@ For real user identity rather than one shared secret, swap `SharedSecretVerifier
 uv run pytest
 ```
 
-221 tests covering the safety layer, value serialization, read-only enforcement and timeouts, HTTP authentication, inspector, explain, index suggestions, schema health, migration validation, error reporting, and the tool wrappers. Each uses a temporary SQLite database, so the suite needs no credentials and no running server.
+246 tests covering the safety layer, value serialization, read-only enforcement and timeouts, HTTP authentication, inspector, explain, index suggestions, schema health, migration validation, error reporting, and the tool wrappers. Each uses a temporary SQLite database, so the suite needs no credentials and no running server.
 
 SQLite cannot produce the types that break a real driver -- it has no `NUMERIC` and returns `str`/`int` for nearly everything -- so [tests/test_serialization.py](tests/test_serialization.py) exercises `Decimal`, `datetime`, `UUID`, and binary values directly rather than through a query. A PostgreSQL and MySQL test path is the next gap worth closing.
 

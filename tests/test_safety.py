@@ -2,9 +2,16 @@ from pathlib import Path
 
 import pytest
 from sqlalchemy import create_engine, text
+from sqlalchemy.exc import SQLAlchemyError
 
 import safety
-from safety import MAX_ROW_LIMIT, execute_safe, validate_query
+from safety import (
+    MAX_ROW_LIMIT,
+    _labels,
+    _repeated_names,
+    execute_safe,
+    validate_query,
+)
 from tests.seed_test_db import create_sample_database
 
 
@@ -190,6 +197,8 @@ def test_row_limit_is_clamped_to_the_maximum(
     result = execute_safe(engine, "SELECT * FROM users", row_limit=10_000_000)
 
     assert result["count"] == 3
+    assert result["row_limit"] == 3
+    assert result["truncated"] is True
 
 
 def test_default_row_limit_maximum_is_a_context_sized_bound():
@@ -207,6 +216,21 @@ def test_row_limit_below_the_maximum_is_untouched(tmp_path: Path):
     result = execute_safe(engine, "SELECT * FROM users", row_limit=5)
 
     assert result["count"] == 5
+    assert result["truncated"] is True
+
+
+def test_result_that_fits_the_limit_is_not_truncated(tmp_path: Path):
+    """A result exactly as long as row_limit is complete, not capped: the
+    extra probe row is what tells the two apart."""
+    database_path = tmp_path / "sample.db"
+    create_sample_database(database_path)
+    engine = create_engine(f"sqlite:///{database_path}")
+    total = execute_safe(engine, "SELECT * FROM users")["count"]
+
+    result = execute_safe(engine, "SELECT * FROM users", row_limit=total)
+
+    assert result["count"] == total
+    assert result["truncated"] is False
 
 
 @pytest.mark.parametrize("row_limit", [0, -1])
@@ -295,3 +319,92 @@ def test_hash_comments_without_space_are_blocked(sql):
 
 def test_hash_inside_literal_is_allowed():
     assert validate_query("SELECT '#hi'")[0]
+
+
+def test_repeated_column_names_are_reported_not_silently_relabelled(tmp_path: Path):
+    database_path = tmp_path / "sample.db"
+    create_sample_database(database_path)
+    engine = create_engine(f"sqlite:///{database_path}")
+
+    result = execute_safe(
+        engine, "SELECT * FROM users u JOIN orders o ON u.id = o.user_id"
+    )
+
+    assert result["columns"] == ["id", "name", "email", "id:1", "user_id", "total"]
+    assert result["duplicate_columns"] == ["id"]
+    assert "Alias the columns" in result["note"]
+
+
+def test_distinct_column_names_carry_no_duplicate_note(tmp_path: Path):
+    database_path = tmp_path / "sample.db"
+    create_sample_database(database_path)
+    engine = create_engine(f"sqlite:///{database_path}")
+
+    result = execute_safe(engine, "SELECT id, name FROM users")
+
+    assert "duplicate_columns" not in result
+    assert "note" not in result
+
+
+def test_a_comment_hidden_by_an_escaped_quote_cannot_remove_the_row_cap(tmp_path: Path):
+    """sqlparse reads a backslash-quote as an escaped quote; SQLite and Postgres end
+    the string there. The validator therefore sees one long string, the database
+    sees a "--" comment, and without a line break the comment ate
+    ") AS limited_query LIMIT n" and the query ran uncapped.
+    """
+    database_path = tmp_path / "sample.db"
+    create_sample_database(database_path)
+    engine = create_engine(f"sqlite:///{database_path}")
+    sql = "SELECT 'x\\') AS q, users u -- '"
+
+    assert validate_query(sql, "sqlite") == (True, "Query is safe")
+    # The comment now ends at its line, leaving a stray ")" -- an error, not rows.
+    with pytest.raises(SQLAlchemyError):
+        execute_safe(engine, sql, row_limit=1)
+
+
+@pytest.mark.parametrize(
+    "sql",
+    [
+        "SELECT data #>> '{a,b}' FROM t",
+        "SELECT * FROM #tmp",
+        "SELECT emp# FROM t",
+    ],
+)
+def test_hash_is_legal_sql_outside_mysql(sql):
+    assert validate_query(sql, "postgresql") == (True, "Query is safe")
+    assert validate_query(sql, "sqlite") == (True, "Query is safe")
+
+
+@pytest.mark.parametrize("dialect", ["mysql", "mariadb", None])
+def test_hash_is_a_comment_where_mysql_reads_it_so(dialect):
+    # None is a caller that cannot name its dialect: the strict reading applies.
+    assert validate_query("SELECT 1 #hi", dialect) == (False, "SQL comments are not allowed")
+
+
+def test_a_bracketed_name_containing_dashes_is_not_a_comment():
+    assert validate_query("SELECT [a--b] FROM t") == (True, "Query is safe")
+
+
+def test_repeated_names_are_labelled_so_no_value_is_lost():
+    # Postgres returns both columns as "x"; keyed by name, the first value vanished.
+    assert _labels(["x", "x", "y", "x"]) == ["x", "x:1", "y", "x:2"]
+    assert _labels(["id", "name"]) == ["id", "name"]
+
+
+def test_repeats_are_found_without_regard_to_case():
+    # SQLite relabels `1 AS id, 2 AS ID` as id, ID:1.
+    assert _repeated_names(["id", "ID:1"]) == ["ID"]
+    assert _repeated_names(["id", "id:1", "id:2", "name"]) == ["id"]
+    assert _repeated_names(["id", "name"]) == []
+
+
+def test_a_case_differing_repeat_is_reported(tmp_path: Path):
+    database_path = tmp_path / "sample.db"
+    create_sample_database(database_path)
+    engine = create_engine(f"sqlite:///{database_path}")
+
+    result = execute_safe(engine, "SELECT 1 AS id, 2 AS ID")
+
+    assert result["duplicate_columns"] == ["ID"]
+    assert result["rows"] == [{"id": 1, "ID:1": 2}]
