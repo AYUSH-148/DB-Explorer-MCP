@@ -80,9 +80,10 @@ def _locking_clause(keywords: list[str]) -> str | None:
 
 
 _COMMENT_MARKERS = ("--", "/*", "*/")
-# A bare "#hi" lexes as a Name, not a Comment, yet MySQL treats it as one. Only
-# the SELECT-only path adds it: in migrations "#" is legitimate (SQL Server #temp).
-_QUERY_COMMENT_MARKERS = _COMMENT_MARKERS + ("#",)
+# A bare "#hi" lexes as a Name, not a Comment, yet MySQL treats it as one. The
+# SELECT-only path always adds it; migrations add it only on MySQL, because
+# elsewhere "#" is legitimate (SQL Server #temp).
+MYSQL_COMMENT_MARKERS = _COMMENT_MARKERS + ("#",)
 
 
 def has_comment(statement: Statement, markers: tuple[str, ...] = _COMMENT_MARKERS) -> bool:
@@ -118,7 +119,7 @@ def validate_query(sql: str) -> tuple[bool, str]:
         statement_type = statement.get_type() or "UNKNOWN"
         return False, f"Only SELECT queries are allowed. Got: {statement_type}"
 
-    if has_comment(statement, _QUERY_COMMENT_MARKERS):
+    if has_comment(statement, MYSQL_COMMENT_MARKERS):
         return False, "SQL comments are not allowed"
 
     # Keywords are collected in order so the clause check below can look at
