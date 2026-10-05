@@ -290,8 +290,13 @@ To watch the guardrails work, ask it to run `DELETE FROM users`. The call fails 
 | `MCP_HOST` | `127.0.0.1` | HTTP transports only |
 | `MCP_PORT` | `8000` | HTTP transports only |
 | `QUERY_TIMEOUT_SECONDS` | `15` | Upper bound on any single statement; must be a positive integer |
+| `DB_POOL_SIZE` | `5` | Connections kept open to the database |
+| `DB_MAX_OVERFLOW` | `10` | Extra connections opened under load, closed when returned |
+| `DB_POOL_TIMEOUT_SECONDS` | `5` | How long a call waits for a free connection before failing with `server_busy` |
 | `MCP_AUTH_TOKEN` | — | **Required** when `MCP_TRANSPORT` is not `stdio`. Minimum 32 characters |
 | `MCP_ALLOW_UNAUTHENTICATED` | `false` | Explicit opt-out of the token requirement, for trusted networks only |
+
+Tool calls run on up to 40 worker threads, but the pool allows at most `DB_POOL_SIZE + DB_MAX_OVERFLOW` (15 by default) at once. A call past that waits `DB_POOL_TIMEOUT_SECONDS`, then fails with `server_busy` so the client can retry. Raise the pool toward 40 for heavier HTTP traffic, but keep it under the database's connection limit (`max_connections`), counted across every server instance.
 
 The sqlite fallback exists for local development only. [config.py](config.py) raises `RuntimeError: DATABASE_URL must be set when serving over HTTP` rather than silently serving an empty local file from a deployment — a failure mode that otherwise surfaces much later as a confusing `unable to open database file`.
 
