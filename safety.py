@@ -82,13 +82,13 @@ def _locking_clause(keywords: list[str]) -> str | None:
 
 
 _COMMENT_MARKERS = ("--", "/*", "*/")
-# A bare "#hi" lexes as a Name, not a Comment, yet MySQL treats it as one. Only
-# the SELECT-only path adds it, and only where "#" can start a comment. Elsewhere
-# it is legal SQL: Postgres #>>, SQL Server #temp, Oracle emp#.
+# A bare "#hi" lexes as a Name, not a Comment, yet MySQL treats it as one. Queries
+# and migrations add it only where "#" can start a comment. Elsewhere it is legal
+# SQL: Postgres #>>, SQL Server #temp, Oracle emp#.
 _HASH_COMMENT_DIALECTS = frozenset({"mysql", "mariadb"})
 
 
-def _query_markers(dialect: str | None) -> tuple[str, ...]:
+def comment_markers(dialect: str | None) -> tuple[str, ...]:
     # A caller that cannot name its dialect gets the strict rule, not the lenient one.
     if dialect is None or dialect in _HASH_COMMENT_DIALECTS:
         return _COMMENT_MARKERS + ("#",)
@@ -142,7 +142,7 @@ def validate_query(sql: str, dialect: str | None = None) -> tuple[bool, str]:
         return False, f"Only SELECT queries are allowed. Got: {statement_type}"
 
     tokens = list(statement.flatten())
-    if _has_comment(tokens, _query_markers(dialect)):
+    if _has_comment(tokens, comment_markers(dialect)):
         return False, "SQL comments are not allowed"
 
     # Keywords are collected in order so the clause check below can look at
