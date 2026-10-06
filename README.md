@@ -103,9 +103,9 @@ Both modes run identical tool code — only `MCP_TRANSPORT` changes.
 | `explore_schema` | `table_name?`, `include_sample_data=false`, `name_pattern?`, `detail=false`, `limit=200`, `offset=0` | A listing of tables and views (each with a `kind` and column count), or one relation's `kind`, columns, PK, FKs, indexes, row count, and up to 3 sample rows |
 | `execute_query` | `sql`, `row_limit=100` (max 1000) | `columns`, `rows`, `count`, `truncated`, and the effective `row_limit` for one validated `SELECT`; plus `duplicate_columns` and a `note` when a result repeats a column name (the repeats are labelled `id:1`, which is not valid SQL) |
 | `explain_query` | `sql` | Native execution plan plus the resolved `dialect` |
-| `validate_schema` | `table_name?` | Schema issues with `severity`, `code`, `message`, `suggestion` |
+| `validate_schema` | `table_name?`, `name_pattern?`, `limit=200`, `offset=0` | Schema issues with `severity`, `code`, `message`, `suggestion`; a whole-database audit is paged like `explore_schema` |
 | `suggest_index` | `query?` **xor** `table_name?` | `CREATE INDEX` recommendations with reasons |
-| `migration_context` | — | Dialect and full schema, for client-side migration drafting |
+| `migration_context` | `name_pattern?`, `limit=200`, `offset=0` | Dialect and one page of full table detail, for client-side migration drafting |
 | `validate_migration` | `up_sql`, `down_sql` | Parsed statement types per script; **never executed** |
 
 `validate_schema` reports four codes: `missing_primary_key`, `unindexed_foreign_key`, `wide_table` (50+ columns), and `no_indexes`. A foreign key counts as indexed when any index, the primary key, or a unique constraint starts with its columns in order, so a one-to-one child keyed on its parent's id is not reported, and no `CREATE INDEX` is suggested that would duplicate an index the database already built. An index that cannot look rows up by value does not count: a partial index (`WHERE ...`), a PostgreSQL GIN, GiST or BRIN index, or a MySQL `FULLTEXT`/`SPATIAL` key. Suggested `CREATE INDEX` statements quote their names, so they run as written against a table called `order` or a PostgreSQL column called `"UserId"`. On MySQL the quotes are backticks, whatever the server's `sql_mode`, because a suggestion is pasted into another session and double quotes only name an identifier where `ANSI_QUOTES` is on.
@@ -162,7 +162,7 @@ Hint: Add a WHERE clause, aggregate instead of scanning, or query a smaller tabl
 | --- | --- |
 | `table_not_found` | No such table. Carries the nearest matching names the database does have |
 | `sql_error` | The database rejected the query — a missing column, a type mismatch, bad syntax |
-| `query_timeout` | The statement hit `QUERY_TIMEOUT_SECONDS` and was cancelled, including a MySQL client-side read timeout |
+| `query_timeout` | The statement hit `QUERY_TIMEOUT_SECONDS` and was cancelled, including a MySQL client-side read timeout (a backstop at twice the limit) |
 | `database_unavailable` | The server could not reach the database, or the link dropped mid-query. The driver's text names the host and user, so it goes to the server log and not to the caller |
 | `unsafe_query` | Blocked by [safety.py](safety.py). The hint names the specific rule that fired |
 | `invalid_argument` | An argument out of range, such as `row_limit` below 1 |

@@ -4,6 +4,7 @@ from sqlalchemy import Engine, inspect
 
 from errors import table_not_found
 from indexes import reflect_coverage
+from inspector import DEFAULT_TABLE_LIMIT, select_page
 
 # Reflection is keyed by (schema, table); every lookup uses the default schema.
 _DEFAULT_SCHEMA: str | None = None
@@ -12,14 +13,18 @@ _DEFAULT_SCHEMA: str | None = None
 def validate_schema(
     engine: Engine,
     table_name: str | None = None,
+    name_pattern: str | None = None,
+    limit: int | None = DEFAULT_TABLE_LIMIT,
+    offset: int = 0,
 ) -> dict[str, Any]:
-    """Report objective schema issues for one table or the whole database."""
+    """Report objective schema issues for one table, or one page of tables."""
     database_inspector = inspect(engine)
     tables = database_inspector.get_table_names()
     if table_name and table_name not in tables:
         raise table_not_found(table_name, tables)
 
-    selected_tables = [table_name] if table_name else tables
+    page = None if table_name else select_page(tables, name_pattern, limit, offset)
+    selected_tables = [table_name] if table_name else page.names
     issues: list[dict[str, Any]] = []
 
     # One query per kind for every selected table, rather than one per kind per
@@ -99,9 +104,12 @@ def validate_schema(
                 }
             )
 
-    return {
+    result: dict[str, Any] = {
         "table": table_name,
         "tables_checked": selected_tables,
         "issue_count": len(issues),
         "issues": issues,
     }
+    if page is not None:
+        result.update(page.summary())
+    return result

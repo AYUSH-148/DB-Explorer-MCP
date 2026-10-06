@@ -122,3 +122,16 @@ def test_validate_migration_rejects_mysql_hash_comment():
 
     with pytest.raises(ValueError, match="comments are not allowed"):
         validate_migration(engine, "DROP TABLE t #hi", "DROP TABLE t")
+
+
+def test_migration_context_is_paged(tmp_path: Path):
+    database_path = tmp_path / "sample.db"
+    create_sample_database(database_path)
+    engine = create_engine(f"sqlite:///{database_path}")
+
+    result = get_migration_context(engine, limit=1)
+
+    assert [table["name"] for table in result["tables"]] == ["orders"]
+    assert result["has_more"] is True
+    assert result["next_offset"] == 1
+    assert get_migration_context(engine, name_pattern="user")["tables"][0]["name"] == "users"

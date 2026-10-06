@@ -116,9 +116,14 @@ def explain_query(sql: str) -> dict[str, Any]:
 
 @mcp.tool
 @tool_errors
-def validate_schema(table_name: str | None = None) -> dict[str, Any]:
+def validate_schema(
+    table_name: str | None = None,
+    name_pattern: str | None = None,
+    limit: int = DEFAULT_TABLE_LIMIT,
+    offset: int = 0,
+) -> dict[str, Any]:
     """Check tables for missing primary keys and unindexed foreign keys."""
-    return validate_schema_data(engine, table_name)
+    return validate_schema_data(engine, table_name, name_pattern, limit, offset)
 
 
 @mcp.tool
@@ -133,9 +138,13 @@ def suggest_index(
 
 @mcp.tool
 @tool_errors
-def migration_context() -> dict[str, Any]:
+def migration_context(
+    name_pattern: str | None = None,
+    limit: int = DEFAULT_TABLE_LIMIT,
+    offset: int = 0,
+) -> dict[str, Any]:
     """Return schema context for client-side migration generation."""
-    return get_migration_context(engine)
+    return get_migration_context(engine, name_pattern, limit, offset)
 
 
 @mcp.tool

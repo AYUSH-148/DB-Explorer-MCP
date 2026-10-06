@@ -37,11 +37,10 @@ _UNREADABLE = (
 )
 
 
-class _Page(NamedTuple):
+class Page(NamedTuple):
     """One page of table names, plus the bounds that produced it."""
 
     names: list[str]
-    kinds: dict[str, str]
     total: int
     limit: int | None
     offset: int
@@ -49,6 +48,19 @@ class _Page(NamedTuple):
     @property
     def has_more(self) -> bool:
         return self.offset + len(self.names) < self.total
+
+    def summary(self) -> dict[str, Any]:
+        """The paging fields every paged tool reports, so a caller can page on."""
+        result: dict[str, Any] = {
+            "total_matching_tables": self.total,
+            "returned": len(self.names),
+            "offset": self.offset,
+            "limit": self.limit,
+            "has_more": self.has_more,
+        }
+        if self.has_more:
+            result["next_offset"] = self.offset + len(self.names)
+        return result
 
 
 def _column_info(column: dict[str, Any]) -> dict[str, Any]:
@@ -86,13 +98,13 @@ def _relation_kinds(inspector: Inspector) -> dict[str, str]:
     return kinds
 
 
-def _select_names(
-    inspector: Inspector,
+def select_page(
+    names: Sequence[str],
     name_pattern: str | None,
     limit: int | None,
     offset: int,
-) -> _Page:
-    """Return the page of table names a call should reflect."""
+) -> Page:
+    """Filter names by pattern and cut one page from them, in sorted order."""
     if limit is not None:
         if limit < 1:
             raise ToolInputError(
@@ -110,13 +122,12 @@ def _select_names(
             received=offset,
         )
 
-    kinds = _relation_kinds(inspector)
-    names = sorted(kinds)
+    names = sorted(names)
     if name_pattern:
         names = [name for name in names if _matches(name, name_pattern)]
 
     end = None if limit is None else offset + limit
-    return _Page(names[offset:end], kinds, len(names), limit, offset)
+    return Page(names[offset:end], len(names), limit, offset)
 
 
 def _batched(
@@ -239,22 +250,23 @@ def get_schema_page(
     """Return one page of tables, as a compact listing or with full detail."""
     with read_only_connection(engine) as connection:
         inspector = inspect(connection)
-        page = _select_names(inspector, name_pattern, limit, offset)
+        kinds = _relation_kinds(inspector)
+        page = select_page(kinds, name_pattern, limit, offset)
 
         if detail:
             reflected = _reflect(inspector, page.names)
             tables = [
-                _table_payload(name, page.kinds[name], reflected[name])
+                _table_payload(name, kinds[name], reflected[name])
                 for name in page.names
             ]
         else:
             columns = _column_lists(inspector, page.names)
             tables = [
-                {"name": name, "kind": page.kinds[name], "error": _UNREADABLE}
+                {"name": name, "kind": kinds[name], "error": _UNREADABLE}
                 if columns[name] is None
                 else {
                     "name": name,
-                    "kind": page.kinds[name],
+                    "kind": kinds[name],
                     "column_count": len(columns[name]),
                 }
                 for name in page.names
@@ -268,16 +280,7 @@ def get_schema_page(
                 if table["kind"] == "table":
                     table["row_count"] = _row_count(connection, table["name"])
 
-    result: dict[str, Any] = {
-        "tables": tables,
-        "total_matching_tables": page.total,
-        "returned": len(tables),
-        "offset": page.offset,
-        "limit": page.limit,
-        "has_more": page.has_more,
-    }
-    if page.has_more:
-        result["next_offset"] = page.offset + len(tables)
+    result: dict[str, Any] = {"tables": tables, **page.summary()}
     if not detail:
         result["detail_hint"] = (
             "Call explore_schema(table_name=...) for columns, keys, indexes, "
