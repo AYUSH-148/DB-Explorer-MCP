@@ -147,5 +147,39 @@ def test_views_are_listed_and_described_like_tables(engine):
     details = get_table_detail(engine, "user_view", include_sample_data=True)
     assert details["kind"] == "view"
     assert [column["name"] for column in details["columns"]] == ["name"]
-    assert details["row_count"] == 1
+    # A view's count would run the view's whole query.
+    assert "row_count" not in details
     assert details["sample_rows"] == [{"name": "Alice"}]
+
+
+def _break_a_view(engine) -> None:
+    """Leave a view whose base table no longer exists."""
+    with engine.begin() as connection:
+        connection.execute(text("CREATE TABLE base (a INTEGER)"))
+        connection.execute(text("CREATE VIEW broken_view AS SELECT a FROM base"))
+        connection.execute(text("DROP TABLE base"))
+
+
+@pytest.mark.parametrize("detail", [False, True])
+def test_one_broken_view_does_not_hide_the_other_tables(engine, detail):
+    _break_a_view(engine)
+
+    page = get_schema_page(engine, detail=detail)
+
+    tables = {table["name"]: table for table in page["tables"]}
+    assert tables["broken_view"]["kind"] == "view"
+    assert "base table" in tables["broken_view"]["error"]
+    assert tables["users"]["kind"] == "table"
+    assert "error" not in tables["users"]
+    assert "error" not in tables["orders"]
+
+
+def test_a_broken_view_asked_for_by_name_reports_instead_of_raising(engine):
+    _break_a_view(engine)
+
+    details = get_table_detail(engine, "broken_view", include_sample_data=True)
+
+    assert details["kind"] == "view"
+    assert "error" in details
+    assert "row_count" not in details
+    assert "sample_rows" not in details
