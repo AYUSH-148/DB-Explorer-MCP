@@ -2,9 +2,11 @@ from pathlib import Path
 
 import pytest
 from sqlalchemy import create_engine, text
+from sqlalchemy.exc import OperationalError
 
 from inspector import (
     MAX_TABLE_LIMIT,
+    _batched,
     get_all_tables,
     get_schema_page,
     get_table_detail,
@@ -178,6 +180,31 @@ def test_one_broken_view_does_not_hide_the_other_tables(engine, detail):
     assert tables["users"]["kind"] == "table"
     assert "error" not in tables["users"]
     assert "error" not in tables["orders"]
+
+
+def test_a_broken_view_costs_log_n_fetches_not_n():
+    names = [f"t{i}" for i in range(200)]
+    calls = []
+
+    def fetch(batch):
+        calls.append(len(batch))
+        if "t137" in batch:
+            raise OperationalError("SELECT 1", {}, Exception("no such table: gone"))
+        return {name: [] for name in batch}
+
+    results = _batched(names, fetch)
+
+    assert [name for name, value in results.items() if value is None] == ["t137"]
+    assert len(results) == 200
+    assert len(calls) < 30
+
+
+def test_a_timeout_is_raised_not_blamed_on_every_relation():
+    def fetch(batch):
+        raise OperationalError("SELECT 1", {}, Exception("canceling statement"))
+
+    with pytest.raises(OperationalError):
+        _batched(["a", "b", "c"], fetch)
 
 
 def test_a_broken_view_asked_for_by_name_reports_instead_of_raising(engine):

@@ -17,7 +17,7 @@ from sqlalchemy.engine.reflection import Inspector, ObjectKind
 from sqlalchemy.exc import SQLAlchemyError
 
 from db import read_only_connection
-from errors import ToolInputError, table_not_found
+from errors import ToolInputError, from_database_error, table_not_found
 from serialization import jsonable, jsonable_rows
 
 # A summary row is small, but a warehouse has thousands of tables. Bound the page so
@@ -134,27 +134,28 @@ def _batched(
     names: Sequence[str],
     fetch: Callable[[Sequence[str]], dict[str, Any]],
 ) -> dict[str, Any]:
-    """Fetch metadata for many relations in one go, or one at a time if that fails.
+    """Fetch metadata for many relations in one go, or by halving if that fails.
 
     One unreadable relation, such as a view whose base table was dropped, fails
     the whole batched query and would take every healthy relation's listing with
-    it. Retrying singly confines the failure to the relation that has it, which
-    maps to None. `fetch` must return an entry for every name it is given.
+    it. Halving the batch until the failure is down to one name confines it to the
+    relation that has it, which maps to None, and costs about log2(n) extra
+    fetches rather than n. `fetch` must return an entry for every name it is given.
     ponytail: no savepoint, so on Postgres a failed statement aborts the
     transaction and the retries fail as well. Postgres refuses to drop a table
     that a view depends on, so a broken view should not occur there.
     """
     try:
         return fetch(names)
-    except SQLAlchemyError:
-        pass
-    results: dict[str, Any] = {}
-    for name in names:
-        try:
-            results.update(fetch([name]))
-        except SQLAlchemyError:
-            results[name] = None
-    return results
+    except SQLAlchemyError as error:
+        # A timeout or lost connection fails every relation alike; splitting the
+        # batch cannot help and would blame each relation for it.
+        if from_database_error(error).code != "sql_error":
+            raise
+    if len(names) == 1:
+        return {names[0]: None}
+    middle = len(names) // 2
+    return {**_batched(names[:middle], fetch), **_batched(names[middle:], fetch)}
 
 
 def _column_lists(
