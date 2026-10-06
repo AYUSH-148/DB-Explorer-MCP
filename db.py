@@ -83,10 +83,15 @@ def timeout_connect_args(backend: str, timeout_seconds: int) -> dict[str, Any]:
             "options": f"-c statement_timeout={timeout_seconds * 1000}",
         }
     if backend == "mysql":
+        # The server-side max_execution_time set in _install_mysql_timeout is what
+        # cancels a slow query. A socket timeout only abandons it, leaving the
+        # server still running it, so keep it well above as a backstop for a
+        # server that ignores the session variable or stops answering.
+        backstop = timeout_seconds * 2
         return {
             "connect_timeout": timeout_seconds,
-            "read_timeout": timeout_seconds,
-            "write_timeout": timeout_seconds,
+            "read_timeout": backstop,
+            "write_timeout": backstop,
         }
     # SQLite is handled by a progress handler; other backends get no bound here.
     return {}

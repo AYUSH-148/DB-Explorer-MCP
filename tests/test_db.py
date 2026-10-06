@@ -84,8 +84,8 @@ def test_postgres_gets_a_server_side_statement_timeout():
 def test_mysql_gets_driver_level_timeouts():
     assert timeout_connect_args("mysql", 7) == {
         "connect_timeout": 7,
-        "read_timeout": 7,
-        "write_timeout": 7,
+        "read_timeout": 14,
+        "write_timeout": 14,
     }
 
 
