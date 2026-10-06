@@ -73,12 +73,21 @@ def _install_mysql_timeout(engine: Engine, timeout_seconds: int) -> None:
 
 
 def timeout_connect_args(backend: str, timeout_seconds: int) -> dict[str, Any]:
-    """Return the driver arguments that bound statement time for a backend."""
+    """Return the driver arguments that bound connect and statement time for a backend."""
+    # connect_timeout bounds a host that drops packets instead of refusing them;
+    # without it every connect, and every pool_pre_ping, waits on the OS TCP timeout.
     if backend == "postgresql":
         # Enforced by the server: Postgres cancels any statement that exceeds it.
-        return {"options": f"-c statement_timeout={timeout_seconds * 1000}"}
+        return {
+            "connect_timeout": timeout_seconds,
+            "options": f"-c statement_timeout={timeout_seconds * 1000}",
+        }
     if backend == "mysql":
-        return {"read_timeout": timeout_seconds, "write_timeout": timeout_seconds}
+        return {
+            "connect_timeout": timeout_seconds,
+            "read_timeout": timeout_seconds,
+            "write_timeout": timeout_seconds,
+        }
     # SQLite is handled by a progress handler; other backends get no bound here.
     return {}
 

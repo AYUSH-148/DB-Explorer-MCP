@@ -76,12 +76,14 @@ def test_an_unbounded_query_is_aborted_by_the_timeout(tmp_path: Path):
 
 def test_postgres_gets_a_server_side_statement_timeout():
     assert timeout_connect_args("postgresql", 7) == {
+        "connect_timeout": 7,
         "options": "-c statement_timeout=7000"
     }
 
 
 def test_mysql_gets_driver_level_timeouts():
     assert timeout_connect_args("mysql", 7) == {
+        "connect_timeout": 7,
         "read_timeout": 7,
         "write_timeout": 7,
     }
