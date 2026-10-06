@@ -188,6 +188,27 @@ def test_a_whole_database_audit_reflects_each_kind_once(coverage_engine, monkeyp
     )
 
 
+def test_a_whole_database_audit_pages_tables_and_skips_views(tmp_path: Path):
+    engine = create_engine(f"sqlite:///{tmp_path / 'paged.db'}")
+    with engine.begin() as connection:
+        for name in ("a", "b", "c"):
+            connection.execute(text(f"CREATE TABLE {name} (value TEXT)"))
+        connection.execute(text("CREATE VIEW a_view AS SELECT value FROM a"))
+
+    first = validate_schema(engine, limit=2)
+    assert first["tables_checked"] == ["a", "b"]
+    assert {issue["table"] for issue in first["issues"]} == {"a", "b"}
+    assert first["total_matching_tables"] == 3
+    assert first["has_more"] is True
+
+    second = validate_schema(engine, limit=2, offset=first["next_offset"])
+    assert second["tables_checked"] == ["c"]
+    assert second["has_more"] is False
+    assert "next_offset" not in second
+
+    assert validate_schema(engine, name_pattern="b")["tables_checked"] == ["b"]
+
+
 def test_validator_rejects_unknown_table(tmp_path: Path):
     engine = create_engine(f"sqlite:///{tmp_path / 'sample.db'}")
 

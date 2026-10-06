@@ -1,3 +1,4 @@
+import logging
 from collections.abc import Callable
 from functools import wraps
 from typing import Any, ParamSpec, TypeVar
@@ -32,6 +33,7 @@ mcp = FastMCP(
     ),
 )
 engine = create_configured_engine(DATABASE_URL)
+logger = logging.getLogger(__name__)
 
 _Params = ParamSpec("_Params")
 _Result = TypeVar("_Result")
@@ -52,6 +54,19 @@ def tool_errors(
         except SQLAlchemyError as error:
             structured = from_database_error(error, engine_timeout_seconds(engine))
             raise ToolError(structured.as_text()) from error
+        except Exception as error:
+            # Anything else is a bug, and its text can carry driver or file
+            # details, so the traceback goes to the server log only.
+            logger.exception("Unexpected error in tool %s", function.__name__)
+            unexpected = ToolInputError(
+                code="internal_error",
+                message="The server failed unexpectedly while handling this call",
+                hint=(
+                    "The cause is in the server log. Retrying the same call "
+                    "will likely fail the same way; try different arguments."
+                ),
+            )
+            raise ToolError(unexpected.as_text()) from error
 
     return wrapper
 
@@ -116,9 +131,14 @@ def explain_query(sql: str) -> dict[str, Any]:
 
 @mcp.tool
 @tool_errors
-def validate_schema(table_name: str | None = None) -> dict[str, Any]:
-    """Check tables for missing primary keys and unindexed foreign keys."""
-    return validate_schema_data(engine, table_name)
+def validate_schema(
+    table_name: str | None = None,
+    name_pattern: str | None = None,
+    limit: int = DEFAULT_TABLE_LIMIT,
+    offset: int = 0,
+) -> dict[str, Any]:
+    """Check one table, or one page of tables, for schema issues."""
+    return validate_schema_data(engine, table_name, name_pattern, limit, offset)
 
 
 @mcp.tool
@@ -133,9 +153,13 @@ def suggest_index(
 
 @mcp.tool
 @tool_errors
-def migration_context() -> dict[str, Any]:
-    """Return schema context for client-side migration generation."""
-    return get_migration_context(engine)
+def migration_context(
+    name_pattern: str | None = None,
+    limit: int = DEFAULT_TABLE_LIMIT,
+    offset: int = 0,
+) -> dict[str, Any]:
+    """Return dialect and one page of table detail for client-side migration drafting."""
+    return get_migration_context(engine, name_pattern, limit, offset)
 
 
 @mcp.tool

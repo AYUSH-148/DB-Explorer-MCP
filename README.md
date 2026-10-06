@@ -103,18 +103,20 @@ Both modes run identical tool code — only `MCP_TRANSPORT` changes.
 | `explore_schema` | `table_name?`, `include_sample_data=false`, `name_pattern?`, `detail=false`, `limit=200`, `offset=0` | A listing of tables and views (each with a `kind` and column count), or one relation's `kind`, columns, PK, FKs, indexes, row count, and up to 3 sample rows |
 | `execute_query` | `sql`, `row_limit=100` (max 1000) | `columns`, `rows`, `count`, `truncated`, and the effective `row_limit` for one validated `SELECT`; plus `duplicate_columns` and a `note` when a result repeats a column name (the repeats are labelled `id:1`, which is not valid SQL) |
 | `explain_query` | `sql` | Native execution plan plus the resolved `dialect` |
-| `validate_schema` | `table_name?` | Schema issues with `severity`, `code`, `message`, `suggestion` |
+| `validate_schema` | `table_name?`, `name_pattern?`, `limit=200`, `offset=0` | Schema issues with `severity`, `code`, `message`, `suggestion`; without `table_name`, one page of tables (views skipped), paged like `explore_schema` |
 | `suggest_index` | `query?` **xor** `table_name?` | `CREATE INDEX` recommendations with reasons |
-| `migration_context` | — | Dialect and full schema, for client-side migration drafting |
+| `migration_context` | `name_pattern?`, `limit=200`, `offset=0` | Dialect plus one page of columns, keys, and indexes (no row counts), for client-side migration drafting; pages like `explore_schema` |
 | `validate_migration` | `up_sql`, `down_sql` | Parsed statement types per script; **never executed** |
 
 `validate_schema` reports four codes: `missing_primary_key`, `unindexed_foreign_key`, `wide_table` (50+ columns), and `no_indexes`. A foreign key counts as indexed when any index, the primary key, or a unique constraint starts with its columns in order, so a one-to-one child keyed on its parent's id is not reported, and no `CREATE INDEX` is suggested that would duplicate an index the database already built. An index that cannot look rows up by value does not count: a partial index (`WHERE ...`), a PostgreSQL GIN, GiST or BRIN index, or a MySQL `FULLTEXT`/`SPATIAL` key. Suggested `CREATE INDEX` statements quote their names, so they run as written against a table called `order` or a PostgreSQL column called `"UserId"`. On MySQL the quotes are backticks, whatever the server's `sql_mode`, because a suggestion is pasted into another session and double quotes only name an identifier where `ANSI_QUOTES` is on.
 
 `explore_schema` is cheap by default and expensive only on request. With no arguments it
 returns table names and column counts — a handful of queries however wide the database
-is, and small enough to read before picking a table. Row counts cost a `COUNT(*)` scan,
-so they arrive only with `table_name`, and never for a view, whose count would run the view's whole query. Narrow a large schema with `name_pattern` (`order`
-matches any name containing it, `order_*` is a glob), page with `limit`/`offset` (capped
+is, and small enough to read before picking a table. Row counts cost a scan, so they
+arrive only with `table_name`, never for a view (its count would run the view's whole
+query), and stop at 100,000 rows: past that, `row_count` is 100000 and
+`row_count_capped` is `true`, so a huge table never times out the call.
+Narrow a large schema with `name_pattern` (`order` matches any name containing it, `order_*` is a glob), page with `limit`/`offset` (capped
 at 1000), and use `detail=true` to expand a whole page into columns, keys, and indexes.
 Views and materialized views are listed alongside tables, since `execute_query` can read
 them too; each entry's `kind` is `table`, `view`, or `materialized_view`. A view whose base table was dropped cannot be read; it is listed with an `error` instead of failing the whole call.
@@ -162,12 +164,13 @@ Hint: Add a WHERE clause, aggregate instead of scanning, or query a smaller tabl
 | --- | --- |
 | `table_not_found` | No such table. Carries the nearest matching names the database does have |
 | `sql_error` | The database rejected the query — a missing column, a type mismatch, bad syntax |
-| `query_timeout` | The statement hit `QUERY_TIMEOUT_SECONDS` and was cancelled, including a MySQL client-side read timeout |
+| `query_timeout` | The statement hit `QUERY_TIMEOUT_SECONDS` and was cancelled, including a MySQL client-side read timeout, or a call that runs many statements spent that budget in total |
 | `database_unavailable` | The server could not reach the database, or the link dropped mid-query. The driver's text names the host and user, so it goes to the server log and not to the caller |
 | `unsafe_query` | Blocked by [safety.py](safety.py). The hint names the specific rule that fired |
 | `invalid_argument` | An argument out of range, such as `row_limit` below 1 |
 | `missing_argument` / `conflicting_arguments` | `suggest_index` needs exactly one of `query` or `table_name` |
 | `comments_not_allowed` / `unparsable_sql` / `select_in_migration` | `validate_migration` rejected a script |
+| `internal_error` | A bug in the server. The traceback goes to the server log; the caller sees only the code |
 
 Two details worth knowing. Errors are raised as FastMCP `ToolError`, which is the only error type that survives a server configured with `mask_error_details=True` — reasonable hardening for an HTTP deployment, and it would otherwise reduce every message above to `Error calling tool`. And `sql_error` reports the query *you* sent, not the row-limit wrapper [safety.py](safety.py) builds around it, so the SQL in the message is SQL you can act on.
 
@@ -180,7 +183,7 @@ Requires Python 3.11+ and [uv](https://docs.astral.sh/uv/).
 ```powershell
 uv sync
 uv run python tests/seed_test_db.py   # creates sample.db
-uv run pytest                         # 246 tests, no external database needed
+uv run pytest                         # 248 tests, no external database needed
 uv run server.py                      # stdio transport
 ```
 
@@ -289,7 +292,7 @@ To watch the guardrails work, ask it to run `DELETE FROM users`. The call fails 
 | `MCP_TRANSPORT` | `stdio` | `stdio`, `streamable-http`, or `sse` |
 | `MCP_HOST` | `127.0.0.1` | HTTP transports only |
 | `MCP_PORT` | `8000` | HTTP transports only |
-| `QUERY_TIMEOUT_SECONDS` | `15` | Upper bound on any single statement; must be a positive integer |
+| `QUERY_TIMEOUT_SECONDS` | `15` | Upper bound on any single statement, and the budget for a whole call: once spent, no further statement starts. Must be a positive integer |
 | `MCP_AUTH_TOKEN` | — | **Required** when `MCP_TRANSPORT` is not `stdio`. Minimum 32 characters |
 | `MCP_ALLOW_UNAUTHENTICATED` | `false` | Explicit opt-out of the token requirement, for trusted networks only |
 
@@ -320,7 +323,7 @@ For real user identity rather than one shared secret, swap `SharedSecretVerifier
 uv run pytest
 ```
 
-246 tests covering the safety layer, value serialization, read-only enforcement and timeouts, HTTP authentication, inspector, explain, index suggestions, schema health, migration validation, error reporting, and the tool wrappers. Each uses a temporary SQLite database, so the suite needs no credentials and no running server.
+248 tests covering the safety layer, value serialization, read-only enforcement and timeouts, HTTP authentication, inspector, explain, index suggestions, schema health, migration validation, error reporting, and the tool wrappers. Each uses a temporary SQLite database, so the suite needs no credentials and no running server.
 
 SQLite cannot produce the types that break a real driver -- it has no `NUMERIC` and returns `str`/`int` for nearly everything -- so [tests/test_serialization.py](tests/test_serialization.py) exercises `Decimal`, `datetime`, `UUID`, and binary values directly rather than through a query. A PostgreSQL and MySQL test path is the next gap worth closing.
 
