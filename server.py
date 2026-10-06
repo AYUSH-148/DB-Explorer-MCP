@@ -1,3 +1,4 @@
+import logging
 from collections.abc import Callable
 from functools import wraps
 from typing import Any, ParamSpec, TypeVar
@@ -32,6 +33,7 @@ mcp = FastMCP(
     ),
 )
 engine = create_configured_engine(DATABASE_URL)
+logger = logging.getLogger(__name__)
 
 _Params = ParamSpec("_Params")
 _Result = TypeVar("_Result")
@@ -52,6 +54,19 @@ def tool_errors(
         except SQLAlchemyError as error:
             structured = from_database_error(error, engine_timeout_seconds(engine))
             raise ToolError(structured.as_text()) from error
+        except Exception as error:
+            # Anything else is a bug, and its text can carry driver or file
+            # details, so the traceback goes to the server log only.
+            logger.exception("Unexpected error in tool %s", function.__name__)
+            unexpected = ToolInputError(
+                code="internal_error",
+                message="The server failed unexpectedly while handling this call",
+                hint=(
+                    "The cause is in the server log. Retrying the same call "
+                    "will likely fail the same way; try different arguments."
+                ),
+            )
+            raise ToolError(unexpected.as_text()) from error
 
     return wrapper
 
