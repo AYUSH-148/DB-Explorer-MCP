@@ -12,6 +12,7 @@ from db import (
     read_only_connection,
     timeout_connect_args,
 )
+from errors import ToolInputError
 from tests.seed_test_db import create_sample_database
 
 
@@ -72,6 +73,21 @@ def test_an_unbounded_query_is_aborted_by_the_timeout(tmp_path: Path):
 
     # Without the deadline this query never returns at all.
     assert elapsed < 10
+
+
+def test_a_call_cannot_start_a_statement_after_its_budget_is_spent(
+    tmp_path: Path,
+):
+    database_path = tmp_path / "sample.db"
+    create_sample_database(database_path)
+    engine = create_configured_engine(f"sqlite:///{database_path}", timeout_seconds=1)
+
+    with read_only_connection(engine) as connection:
+        connection.execute(text("SELECT 1"))
+        time.sleep(1.1)
+        # Each statement is fast; it is the call as a whole that is over budget.
+        with pytest.raises(ToolInputError, match="query_timeout|time budget"):
+            connection.execute(text("SELECT 1"))
 
 
 def test_postgres_gets_a_server_side_statement_timeout():

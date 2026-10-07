@@ -2,9 +2,10 @@ from typing import Any
 
 from sqlalchemy import Engine, inspect
 
+from db import read_only_connection
 from errors import table_not_found
 from indexes import reflect_coverage
-from inspector import DEFAULT_TABLE_LIMIT, select_page
+from inspector import DEFAULT_TABLE_LIMIT, select_names
 
 # Reflection is keyed by (schema, table); every lookup uses the default schema.
 _DEFAULT_SCHEMA: str | None = None
@@ -14,33 +15,44 @@ def validate_schema(
     engine: Engine,
     table_name: str | None = None,
     name_pattern: str | None = None,
-    limit: int | None = DEFAULT_TABLE_LIMIT,
+    limit: int = DEFAULT_TABLE_LIMIT,
     offset: int = 0,
 ) -> dict[str, Any]:
-    """Report objective schema issues for one table, or one page of tables."""
-    database_inspector = inspect(engine)
-    tables = database_inspector.get_table_names()
-    if table_name and table_name not in tables:
-        raise table_not_found(table_name, tables)
+    """Report objective schema issues for one table or one page of tables.
 
-    page = None if table_name else select_page(tables, name_pattern, limit, offset)
-    selected_tables = [table_name] if table_name else page.names
+    Views are skipped: they have no primary key or indexes of their own.
+    """
+    with read_only_connection(engine) as connection:
+        database_inspector = inspect(connection)
+        if table_name:
+            tables = database_inspector.get_table_names()
+            if table_name not in tables:
+                raise table_not_found(table_name, tables)
+            page = None
+            selected_tables = [table_name]
+        else:
+            page = select_names(
+                database_inspector, name_pattern, limit, offset, tables_only=True
+            )
+            selected_tables = page.names
+
+        # One call per kind for every selected table. PostgreSQL and Oracle answer
+        # each in one query; SQLAlchemy loops per table on the other dialects, which
+        # is why the page is bounded.
+        filter_names = list(selected_tables)
+        all_columns = (
+            database_inspector.get_multi_columns(filter_names=filter_names)
+            if filter_names
+            else {}
+        )
+        all_foreign_keys = (
+            database_inspector.get_multi_foreign_keys(filter_names=filter_names)
+            if filter_names
+            else {}
+        )
+        coverage = reflect_coverage(database_inspector, selected_tables)
+
     issues: list[dict[str, Any]] = []
-
-    # One query per kind for every selected table, rather than one per kind per
-    # table: a 500-table audit costs four queries instead of two thousand.
-    filter_names = list(selected_tables)
-    all_columns = (
-        database_inspector.get_multi_columns(filter_names=filter_names)
-        if filter_names
-        else {}
-    )
-    all_foreign_keys = (
-        database_inspector.get_multi_foreign_keys(filter_names=filter_names)
-        if filter_names
-        else {}
-    )
-    coverage = reflect_coverage(database_inspector, selected_tables)
 
     for current_table in selected_tables:
         columns = all_columns.get((_DEFAULT_SCHEMA, current_table), [])
@@ -111,5 +123,12 @@ def validate_schema(
         "issues": issues,
     }
     if page is not None:
-        result.update(page.summary())
+        result.update(
+            total_matching_tables=page.total,
+            offset=page.offset,
+            limit=page.limit,
+            has_more=page.has_more,
+        )
+        if page.has_more:
+            result["next_offset"] = page.offset + len(page.names)
     return result

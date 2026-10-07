@@ -12,20 +12,19 @@ from safety import comment_markers, has_comment
 def get_migration_context(
     engine: Engine,
     name_pattern: str | None = None,
-    limit: int | None = DEFAULT_TABLE_LIMIT,
+    limit: int = DEFAULT_TABLE_LIMIT,
     offset: int = 0,
 ) -> dict[str, Any]:
-    """Return dialect context and one page of full table detail for migration drafting."""
+    """Return dialect and one page of full table detail for migration drafting.
+
+    Detail only: no row counts, since a COUNT(*) per table scans the database.
+    """
+    page = get_schema_page(
+        engine, name_pattern=name_pattern, limit=limit, offset=offset, detail=True
+    )
     return {
         "dialect": engine.dialect.name,
-        **get_schema_page(
-            engine,
-            name_pattern=name_pattern,
-            limit=limit,
-            offset=offset,
-            detail=True,
-            include_row_counts=True,
-        ),
+        **page,
         "execution_note": "Migration SQL is generated and run by the user, never by this server.",
     }
 

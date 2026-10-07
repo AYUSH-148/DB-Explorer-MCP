@@ -22,6 +22,7 @@ from config import (
     DB_POOL_TIMEOUT_SECONDS,
     QUERY_TIMEOUT_SECONDS,
 )
+from errors import ToolInputError
 
 _deadline = threading.local()
 
@@ -49,6 +50,33 @@ def _install_sqlite_deadline(engine: Engine) -> None:
         dbapi_connection.set_progress_handler(
             _abort_if_expired, _SQLITE_PROGRESS_INSTRUCTIONS
         )
+
+
+def _install_request_deadline(engine: Engine) -> None:
+    """Refuse to start a statement once the call's whole budget is spent.
+
+    Postgres and MySQL bound each statement, not the call, so a call that runs one
+    statement per table could otherwise take the timeout once per table.
+    ponytail: checked between statements only, so the statement that crosses the
+    deadline still runs to its own limit: a call can take up to twice the
+    timeout. Lower the server-side limit per statement if that matters.
+    """
+
+    @event.listens_for(engine, "before_cursor_execute")
+    def _refuse_if_expired(*_args: Any) -> None:
+        deadline = getattr(_deadline, "value", None)
+        if deadline is not None and time.monotonic() > deadline:
+            raise ToolInputError(
+                code="query_timeout",
+                message=(
+                    "The call ran past its time budget of "
+                    f"{engine_timeout_seconds(engine)}s"
+                ),
+                hint=(
+                    "Ask for less in one call: a smaller limit, a name_pattern, "
+                    "or no row counts. The budget is set by QUERY_TIMEOUT_SECONDS."
+                ),
+            )
 
 
 def _install_mysql_timeout(engine: Engine, timeout_seconds: int) -> None:
@@ -117,6 +145,7 @@ def create_configured_engine(
         execution_options={TIMEOUT_EXECUTION_OPTION: timeout_seconds},
     )
 
+    _install_request_deadline(engine)
     if backend == "sqlite":
         _install_sqlite_deadline(engine)
     elif backend == "mysql":

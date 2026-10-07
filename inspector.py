@@ -2,8 +2,8 @@
 
 Two rules keep this cheap. One connection and one Inspector serve an entire call,
 and metadata for every table on the page arrives in one query per kind rather than
-one query per table. Row counts are the exception: COUNT(*) scans the whole table,
-so they are computed for a single named table, or when a caller opts in.
+one query per table. Row counts are the exception: they scan rows, so they are
+computed only for a single named table, and stop at ROW_COUNT_CAP.
 """
 
 from __future__ import annotations
@@ -25,6 +25,9 @@ from serialization import jsonable, jsonable_rows
 DEFAULT_TABLE_LIMIT = 200
 MAX_TABLE_LIMIT = 1000
 
+# Past this many rows, row_count reports the cap and row_count_capped is true.
+ROW_COUNT_CAP = 100_000
+
 _WILDCARDS = "*?["
 
 # Reflection is keyed by (schema, table). Multi-schema support is not wired up yet,
@@ -37,10 +40,11 @@ _UNREADABLE = (
 )
 
 
-class Page(NamedTuple):
+class _Page(NamedTuple):
     """One page of table names, plus the bounds that produced it."""
 
     names: list[str]
+    kinds: dict[str, str]
     total: int
     limit: int | None
     offset: int
@@ -48,19 +52,6 @@ class Page(NamedTuple):
     @property
     def has_more(self) -> bool:
         return self.offset + len(self.names) < self.total
-
-    def summary(self) -> dict[str, Any]:
-        """The paging fields every paged tool reports, so a caller can page on."""
-        result: dict[str, Any] = {
-            "total_matching_tables": self.total,
-            "returned": len(self.names),
-            "offset": self.offset,
-            "limit": self.limit,
-            "has_more": self.has_more,
-        }
-        if self.has_more:
-            result["next_offset"] = self.offset + len(self.names)
-        return result
 
 
 def _column_info(column: dict[str, Any]) -> dict[str, Any]:
@@ -98,13 +89,18 @@ def _relation_kinds(inspector: Inspector) -> dict[str, str]:
     return kinds
 
 
-def select_page(
-    names: Sequence[str],
+def select_names(
+    inspector: Inspector,
     name_pattern: str | None,
     limit: int | None,
     offset: int,
-) -> Page:
-    """Filter names by pattern and cut one page from them, in sorted order."""
+    tables_only: bool = False,
+) -> _Page:
+    """Return the page of relation names a call should reflect.
+
+    tables_only leaves out views, for callers whose checks only make sense on a
+    table, such as a missing primary key.
+    """
     if limit is not None:
         if limit < 1:
             raise ToolInputError(
@@ -122,12 +118,16 @@ def select_page(
             received=offset,
         )
 
-    names = sorted(names)
+    if tables_only:
+        kinds = {name: "table" for name in inspector.get_table_names()}
+    else:
+        kinds = _relation_kinds(inspector)
+    names = sorted(kinds)
     if name_pattern:
         names = [name for name in names if _matches(name, name_pattern)]
 
     end = None if limit is None else offset + limit
-    return Page(names[offset:end], len(names), limit, offset)
+    return _Page(names[offset:end], kinds, len(names), limit, offset)
 
 
 def _batched(
@@ -235,9 +235,21 @@ def _table_payload(
     }
 
 
-def _row_count(connection: Connection, table_name: str) -> int:
+def _row_count(connection: Connection, table_name: str) -> tuple[int, bool]:
+    """Count rows up to ROW_COUNT_CAP; return (count, capped).
+
+    A bare COUNT(*) scans the whole table, so a billion-row table hit the statement
+    timeout and the call returned nothing, not even the columns already reflected.
+    Counting a LIMITed subquery stops the scan at the cap on every dialect.
+    """
     quoted = connection.dialect.identifier_preparer.quote(table_name)
-    return connection.execute(text(f"SELECT COUNT(*) FROM {quoted}")).scalar_one()
+    count = connection.execute(
+        text(
+            f"SELECT COUNT(*) FROM (SELECT 1 FROM {quoted} "
+            f"LIMIT {ROW_COUNT_CAP + 1}) AS capped"
+        )
+    ).scalar_one()
+    return min(count, ROW_COUNT_CAP), count > ROW_COUNT_CAP
 
 
 def get_schema_page(
@@ -246,61 +258,47 @@ def get_schema_page(
     limit: int | None = DEFAULT_TABLE_LIMIT,
     offset: int = 0,
     detail: bool = False,
-    include_row_counts: bool = False,
 ) -> dict[str, Any]:
     """Return one page of tables, as a compact listing or with full detail."""
     with read_only_connection(engine) as connection:
         inspector = inspect(connection)
-        kinds = _relation_kinds(inspector)
-        page = select_page(kinds, name_pattern, limit, offset)
+        page = select_names(inspector, name_pattern, limit, offset)
 
         if detail:
             reflected = _reflect(inspector, page.names)
             tables = [
-                _table_payload(name, kinds[name], reflected[name])
+                _table_payload(name, page.kinds[name], reflected[name])
                 for name in page.names
             ]
         else:
             columns = _column_lists(inspector, page.names)
             tables = [
-                {"name": name, "kind": kinds[name], "error": _UNREADABLE}
+                {"name": name, "kind": page.kinds[name], "error": _UNREADABLE}
                 if columns[name] is None
                 else {
                     "name": name,
-                    "kind": kinds[name],
+                    "kind": page.kinds[name],
                     "column_count": len(columns[name]),
                 }
                 for name in page.names
             ]
 
-        if include_row_counts:
-            # Tables only. COUNT(*) over a view runs the view's whole query, so one
-            # expensive view could time out a listing of every table, and a
-            # Postgres materialized view created WITH NO DATA refuses to be read.
-            for table in tables:
-                if table["kind"] == "table":
-                    table["row_count"] = _row_count(connection, table["name"])
-
-    result: dict[str, Any] = {"tables": tables, **page.summary()}
+    result: dict[str, Any] = {
+        "tables": tables,
+        "total_matching_tables": page.total,
+        "returned": len(tables),
+        "offset": page.offset,
+        "limit": page.limit,
+        "has_more": page.has_more,
+    }
+    if page.has_more:
+        result["next_offset"] = page.offset + len(tables)
     if not detail:
         result["detail_hint"] = (
             "Call explore_schema(table_name=...) for columns, keys, indexes, "
             "and row count."
         )
     return result
-
-
-def get_all_tables(
-    engine: Engine,
-    include_row_counts: bool = True,
-) -> list[dict[str, Any]]:
-    """Return full detail for every table in the database."""
-    return get_schema_page(
-        engine,
-        limit=None,
-        detail=True,
-        include_row_counts=include_row_counts,
-    )["tables"]
 
 
 def get_table_detail(
@@ -322,7 +320,9 @@ def get_table_detail(
         # No count for a view: it would run the view's whole query and could time
         # out the one call that exists to show the structure.
         if kinds[table_name] == "table":
-            details["row_count"] = _row_count(connection, table_name)
+            details["row_count"], details["row_count_capped"] = _row_count(
+                connection, table_name
+            )
 
         if include_sample_data:
             quoted = connection.dialect.identifier_preparer.quote(table_name)

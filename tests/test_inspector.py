@@ -7,7 +7,6 @@ from sqlalchemy.exc import OperationalError
 from inspector import (
     MAX_TABLE_LIMIT,
     _batched,
-    get_all_tables,
     get_schema_page,
     get_table_detail,
 )
@@ -19,22 +18,6 @@ def engine(tmp_path: Path):
     database_path = tmp_path / "sample.db"
     create_sample_database(database_path)
     return create_engine(f"sqlite:///{database_path}")
-
-
-def test_get_all_tables_returns_schema_summary(engine):
-    tables = get_all_tables(engine)
-
-    assert [table["name"] for table in tables] == ["orders", "users"]
-    orders = next(table for table in tables if table["name"] == "orders")
-    assert orders["row_count"] == 1
-    assert orders["primary_key"] == ["id"]
-    assert orders["foreign_keys"] == [
-        {
-            "columns": ["user_id"],
-            "referred_table": "users",
-            "referred_columns": ["id"],
-        }
-    ]
 
 
 def test_get_table_detail_can_include_sample_rows(engine):
@@ -52,7 +35,25 @@ def test_get_table_detail_rejects_unknown_table(engine):
 
 
 def test_get_table_detail_reports_row_count(engine):
-    assert get_table_detail(engine, "users")["row_count"] == 1
+    details = get_table_detail(engine, "users")
+    assert details["row_count"] == 1
+    assert details["row_count_capped"] is False
+
+
+def test_get_table_detail_caps_row_count(engine, monkeypatch):
+    # A full COUNT(*) on a huge table timed out and failed the whole call.
+    monkeypatch.setattr("inspector.ROW_COUNT_CAP", 2)
+    with engine.begin() as connection:
+        connection.execute(
+            text(
+                "INSERT INTO users (id, name, email) VALUES "
+                "(2, 'B', 'b@example.com'), (3, 'C', 'c@example.com')"
+            )
+        )
+
+    details = get_table_detail(engine, "users")
+    assert details["row_count"] == 2
+    assert details["row_count_capped"] is True
 
 
 def test_schema_page_summarises_without_counting_rows(engine):
@@ -153,13 +154,6 @@ def test_views_are_listed_and_described_like_tables(engine):
     assert details["sample_rows"] == [{"name": "Alice"}]
 
 
-def test_get_all_tables_can_skip_row_counts(engine):
-    tables = get_all_tables(engine, include_row_counts=False)
-
-    assert [table["name"] for table in tables] == ["orders", "users"]
-    assert all("row_count" not in table for table in tables)
-
-
 def _break_a_view(engine) -> None:
     """Leave a view whose base table no longer exists."""
     with engine.begin() as connection:
@@ -216,13 +210,3 @@ def test_a_broken_view_asked_for_by_name_reports_instead_of_raising(engine):
     assert "error" in details
     assert "row_count" not in details
     assert "sample_rows" not in details
-
-
-def test_row_counts_are_taken_for_tables_and_not_for_views(engine):
-    with engine.begin() as connection:
-        connection.execute(text("CREATE VIEW user_view AS SELECT name FROM users"))
-
-    tables = {table["name"]: table for table in get_all_tables(engine)}
-
-    assert tables["users"]["row_count"] == 1
-    assert "row_count" not in tables["user_view"]

@@ -156,3 +156,20 @@ def test_the_undecorated_helpers_still_raise_for_python_callers(
 
     with pytest.raises(ToolInputError, match="Table not found: usrs"):
         server.explore_schema_data(table_name="usrs")
+
+
+def test_an_unexpected_error_is_logged_but_not_shown_to_the_caller(
+    monkeypatch, caplog
+):
+    def explode(*_args, **_kwargs):
+        raise TypeError("secret driver detail at /srv/db.sock")
+
+    monkeypatch.setattr(server, "explain_safe", explode)
+
+    with pytest.raises(ToolError) as raised:
+        server.explain_query("SELECT 1")
+
+    message = str(raised.value)
+    assert "[internal_error]" in message
+    assert "secret" not in message
+    assert "secret driver detail" in caplog.text
