@@ -143,6 +143,20 @@ Validation is only the first of three layers, because a keyword blocklist cannot
 - **A read-only transaction.** Reads run through `BEGIN READ ONLY` on PostgreSQL, `SET SESSION TRANSACTION READ ONLY` on MySQL, and `PRAGMA query_only` on SQLite. The database refuses the write itself, which is a guarantee the blocklist cannot make.
 - **Privileges.** Still the outermost boundary — see [.env.example](.env.example). A `SELECT`-only user is what stops server-side file reads like `pg_read_file()` that no keyword check reliably catches.
 
+  Privileges are also where to restrict *what* can be read. The token is all-or-nothing, so anything the database user can `SELECT`, every token holder can read. Hide credentials and PII with grants, not with a server-side table or column blocklist: a parser cannot see the columns behind `SELECT *`, `SELECT u FROM users u`, or `row_to_json(u)`, but the database enforces a grant on all of them.
+
+  ```sql
+  -- PostgreSQL: whole tables, minus one
+  GRANT SELECT ON ALL TABLES IN SCHEMA public TO explorer;
+  REVOKE SELECT ON users FROM explorer;
+  -- then only the safe columns of it
+  GRANT SELECT (id, name, created_at) ON users TO explorer;
+  ```
+
+  MySQL takes the same column list: `GRANT SELECT (id, name) ON app.users TO 'explorer'@'%';`. A query that touches a revoked column then fails with `sql_error` (`permission denied`). On PostgreSQL, `explore_schema` still lists tables the user cannot read, because reflection reads the catalog, not the data.
+
+Every statement that reads data on a caller's behalf is logged on the `db_explorer.audit` logger at `INFO`, one line each, to stderr: `execute_query` (SQL, row count, `truncated`), `explain_query` (SQL), and `explore_schema` sample rows (table). Refused queries read nothing and are not logged. The SQL is logged verbatim, so literals in a `WHERE` clause land in the log; treat the log as being as sensitive as the data. With one shared token the log records what was read and when, not who read it.
+
 `validate_migration` is deliberately the inverse: it rejects `SELECT` statements, and it never runs either script. You get the parsed statement types back and run the DDL yourself.
 
 ## Errors

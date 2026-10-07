@@ -16,7 +16,7 @@ from config import (
     MCP_PORT,
     MCP_TRANSPORT,
 )
-from db import create_configured_engine, engine_timeout_seconds
+from db import audit_log, create_configured_engine, engine_timeout_seconds
 from errors import ToolInputError, from_database_error
 from explain import explain_safe
 from inspector import DEFAULT_TABLE_LIMIT, get_schema_page, get_table_detail
@@ -170,6 +170,10 @@ def validate_migration(up_sql: str, down_sql: str) -> dict[str, Any]:
 
 
 def run_server() -> None:
+    # stderr, so the stdio transport's stdout stays clean. Root stays at WARNING:
+    # raising it would turn on SQLAlchemy's own per-statement logging.
+    logging.basicConfig(format="%(asctime)s %(levelname)s %(name)s %(message)s")
+    audit_log.setLevel(logging.INFO)
     if MCP_TRANSPORT == "stdio":
         mcp.run(transport="stdio")
         return

@@ -7,6 +7,7 @@ refuses to write through.
 
 from __future__ import annotations
 
+import logging
 import threading
 import time
 from collections.abc import Iterator
@@ -24,6 +25,11 @@ from config import (
     QUERY_TIMEOUT_SECONDS,
 )
 from errors import ToolInputError
+
+# One line per statement that read data on a caller's behalf, so an operator can
+# answer "what did this server read, and when". Its own name lets a deployment
+# route it apart from the operational log.
+audit_log = logging.getLogger("db_explorer.audit")
 
 _deadline = threading.local()
 

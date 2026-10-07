@@ -2,7 +2,7 @@ from typing import Any
 
 from sqlalchemy import Engine, text
 
-from db import read_only_connection
+from db import audit_log, read_only_connection
 from errors import unsafe_query
 from safety import validate_query
 from serialization import jsonable_rows
@@ -22,6 +22,7 @@ def explain_safe(engine: Engine, sql: str) -> dict[str, Any]:
         result = connection.execute(text(explain_sql))
         rows = jsonable_rows(result.mappings())
         columns = list(result.keys())
+    audit_log.info("explain_query sql=%r", query)
 
     return {
         "query": query,
