@@ -155,7 +155,7 @@ Validation is only the first of three layers, because a keyword blocklist cannot
 
   MySQL takes the same column list: `GRANT SELECT (id, name) ON app.users TO 'explorer'@'%';`. A query that touches a revoked column then fails with `sql_error` (`permission denied`). On PostgreSQL, `explore_schema` still lists tables the user cannot read, because reflection reads the catalog, not the data.
 
-Every statement that reads data on a caller's behalf is logged on the `db_explorer.audit` logger at `INFO`, one line each, to stderr: `execute_query` (SQL, row count, `truncated`), `explain_query` (SQL), and `explore_schema` sample rows (table). Refused queries read nothing and are not logged. The SQL is logged verbatim, so literals in a `WHERE` clause land in the log; treat the log as being as sensitive as the data. With one shared token the log records what was read and when, not who read it.
+Every tool call is logged on the `db_explorer.audit` logger, one line each, to stderr: the tool name, how it ended (`ok`, with `rows` and `truncated` for `execute_query`, or the error code such as `unsafe_query`, `sql_error` or `query_timeout`), and its arguments, capped at 2000 characters. Refused, denied and timed-out calls are logged too. The logger is set up when `server.py` is imported, so a hosted entrypoint (`server.py:mcp`) logs the same as `uv run server.py`. Arguments are logged verbatim, so literals in a `WHERE` clause land in the log; treat the log as being as sensitive as the data. With one shared token the log records what was asked and when, not who asked.
 
 `validate_migration` is deliberately the inverse: it rejects `SELECT` statements, and it never runs either script. You get the parsed statement types back and run the DDL yourself.
 
@@ -197,7 +197,7 @@ Requires Python 3.11+ and [uv](https://docs.astral.sh/uv/).
 ```powershell
 uv sync
 uv run python tests/seed_test_db.py   # creates sample.db
-uv run pytest                         # 253 tests, no external database needed
+uv run pytest                         # 258 tests, no external database needed
 uv run server.py                      # stdio transport
 ```
 
@@ -342,7 +342,7 @@ For real user identity rather than one shared secret, swap `SharedSecretVerifier
 uv run pytest
 ```
 
-253 tests covering the safety layer, value serialization, read-only enforcement and timeouts, HTTP authentication, inspector, explain, index suggestions, schema health, migration validation, error reporting, and the tool wrappers. Each uses a temporary SQLite database, so the suite needs no credentials and no running server.
+258 tests covering the safety layer, value serialization, read-only enforcement and timeouts, HTTP authentication, inspector, explain, index suggestions, schema health, migration validation, error reporting, and the tool wrappers. Each uses a temporary SQLite database, so the suite needs no credentials and no running server.
 
 SQLite cannot produce the types that break a real driver -- it has no `NUMERIC` and returns `str`/`int` for nearly everything -- so [tests/test_serialization.py](tests/test_serialization.py) exercises `Decimal`, `datetime`, `UUID`, and binary values directly rather than through a query. A PostgreSQL and MySQL test path is the next gap worth closing.
 

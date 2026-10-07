@@ -16,7 +16,7 @@ from sqlalchemy import Connection, Engine, inspect, text
 from sqlalchemy.engine.reflection import Inspector, ObjectKind
 from sqlalchemy.exc import SQLAlchemyError
 
-from db import audit_log, read_only_connection
+from db import read_only_connection
 from errors import ToolInputError, from_database_error, table_not_found
 from serialization import jsonable, jsonable_rows
 
@@ -340,5 +340,4 @@ def get_table_detail(
             quoted = connection.dialect.identifier_preparer.quote(table_name)
             result = connection.execute(text(f"SELECT * FROM {quoted} LIMIT 3"))
             details["sample_rows"] = jsonable_rows(result.mappings())
-            audit_log.info("explore_schema sample_rows table=%r", table_name)
     return details

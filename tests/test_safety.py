@@ -408,19 +408,3 @@ def test_a_case_differing_repeat_is_reported(tmp_path: Path):
 
     assert result["duplicate_columns"] == ["ID"]
     assert result["rows"] == [{"id": 1, "ID:1": 2}]
-
-
-def test_execute_safe_writes_audit_line(tmp_path: Path, caplog):
-    database_path = tmp_path / "sample.db"
-    create_sample_database(database_path)
-    engine = create_engine(f"sqlite:///{database_path}")
-
-    with caplog.at_level("INFO", logger="db_explorer.audit"):
-        execute_safe(engine, "SELECT name FROM users")
-        with pytest.raises(ValueError):
-            execute_safe(engine, "DELETE FROM users")
-
-    # One line for the read that ran; none for the query that was refused.
-    assert [record.getMessage() for record in caplog.records] == [
-        "execute_query rows=1 truncated=False sql='SELECT name FROM users'"
-    ]

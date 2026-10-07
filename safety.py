@@ -6,7 +6,7 @@ from sqlalchemy import Engine, text
 from sqlparse import parse
 from sqlparse.sql import Statement, Token
 from sqlparse.tokens import Comment, DDL, DML, Keyword, Literal
-from db import audit_log, read_only_connection
+from db import read_only_connection
 from errors import ToolInputError, unsafe_query
 from serialization import jsonable_rows
 
@@ -250,12 +250,6 @@ def execute_safe(
 
     truncated = len(rows) > row_limit
     rows = rows[:row_limit]
-    audit_log.info(
-        "execute_query rows=%d truncated=%s sql=%r",
-        len(rows),
-        truncated,
-        inner_query,
-    )
     response = {
         "columns": columns,
         "rows": rows,
