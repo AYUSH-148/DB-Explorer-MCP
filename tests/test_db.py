@@ -4,6 +4,7 @@ from pathlib import Path
 import pytest
 from sqlalchemy import text
 from sqlalchemy.exc import DBAPIError, OperationalError
+from sqlalchemy.exc import TimeoutError as PoolTimeoutError
 
 from db import (
     create_configured_engine,
@@ -91,14 +92,16 @@ def test_a_call_cannot_start_a_statement_after_its_budget_is_spent(
 
 def test_postgres_gets_a_server_side_statement_timeout():
     assert timeout_connect_args("postgresql", 7) == {
+        "connect_timeout": 7,
         "options": "-c statement_timeout=7000"
     }
 
 
 def test_mysql_gets_driver_level_timeouts():
     assert timeout_connect_args("mysql", 7) == {
-        "read_timeout": 7,
-        "write_timeout": 7,
+        "connect_timeout": 7,
+        "read_timeout": 14,
+        "write_timeout": 14,
     }
 
 
@@ -125,3 +128,29 @@ def test_the_engines_timeout_is_used_when_none_is_passed(tmp_path: Path):
         with pytest.raises(DBAPIError):
             connection.execute(text(UNBOUNDED_QUERY))
     assert time.monotonic() - started < 8
+
+
+@pytest.mark.parametrize("url", ["sqlite://", "sqlite:///:memory:"])
+def test_in_memory_sqlite_builds_an_engine(url):
+    # Its pool rejects max_overflow and pool_timeout.
+    engine = create_configured_engine(url)
+
+    with read_only_connection(engine) as connection:
+        assert connection.execute(text("SELECT 1")).scalar_one() == 1
+
+
+def test_exhausted_pool_fails_fast(tmp_path: Path):
+    # Past the pool, a call must fail with a pool timeout (reported as server_busy),
+    # not wait SQLAlchemy's default 30 seconds.
+    database_path = tmp_path / "sample.db"
+    create_sample_database(database_path)
+    engine = create_configured_engine(
+        f"sqlite:///{database_path}", pool_size=1, max_overflow=0, pool_timeout=1
+    )
+
+    with read_only_connection(engine):
+        started = time.monotonic()
+        with pytest.raises(PoolTimeoutError):
+            with read_only_connection(engine):
+                pass
+        assert time.monotonic() - started < 5

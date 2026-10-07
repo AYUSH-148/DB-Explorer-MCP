@@ -164,7 +164,7 @@ Hint: Add a WHERE clause, aggregate instead of scanning, or query a smaller tabl
 | --- | --- |
 | `table_not_found` | No such table. Carries the nearest matching names the database does have |
 | `sql_error` | The database rejected the query — a missing column, a type mismatch, bad syntax |
-| `query_timeout` | The statement hit `QUERY_TIMEOUT_SECONDS` and was cancelled, including a MySQL client-side read timeout, or a call that runs many statements spent that budget in total |
+| `query_timeout` | The statement hit `QUERY_TIMEOUT_SECONDS` and was cancelled, including a MySQL client-side read timeout (a backstop at twice the limit), or a call that runs many statements spent that budget in total |
 | `database_unavailable` | The server could not reach the database, or the link dropped mid-query. The driver's text names the host and user, so it goes to the server log and not to the caller |
 | `unsafe_query` | Blocked by [safety.py](safety.py). The hint names the specific rule that fired |
 | `invalid_argument` | An argument out of range, such as `row_limit` below 1 |
@@ -183,7 +183,7 @@ Requires Python 3.11+ and [uv](https://docs.astral.sh/uv/).
 ```powershell
 uv sync
 uv run python tests/seed_test_db.py   # creates sample.db
-uv run pytest                         # 248 tests, no external database needed
+uv run pytest                         # 253 tests, no external database needed
 uv run server.py                      # stdio transport
 ```
 
@@ -293,8 +293,13 @@ To watch the guardrails work, ask it to run `DELETE FROM users`. The call fails 
 | `MCP_HOST` | `127.0.0.1` | HTTP transports only |
 | `MCP_PORT` | `8000` | HTTP transports only |
 | `QUERY_TIMEOUT_SECONDS` | `15` | Upper bound on any single statement, and the budget for a whole call: once spent, no further statement starts. Must be a positive integer |
+| `DB_POOL_SIZE` | `5` | Connections kept open to the database |
+| `DB_MAX_OVERFLOW` | `10` | Extra connections opened under load, closed when returned |
+| `DB_POOL_TIMEOUT_SECONDS` | `5` | How long a call waits for a free connection before failing with `server_busy` |
 | `MCP_AUTH_TOKEN` | — | **Required** when `MCP_TRANSPORT` is not `stdio`. Minimum 32 characters |
 | `MCP_ALLOW_UNAUTHENTICATED` | `false` | Explicit opt-out of the token requirement, for trusted networks only |
+
+Tool calls run on up to 40 worker threads, but the pool allows at most `DB_POOL_SIZE + DB_MAX_OVERFLOW` (15 by default) at once. A call past that waits `DB_POOL_TIMEOUT_SECONDS`, then fails with `server_busy` so the client can retry. Raise the pool toward 40 for heavier HTTP traffic, but keep it under the database's connection limit (`max_connections`), counted across every server instance.
 
 The sqlite fallback exists for local development only. [config.py](config.py) raises `RuntimeError: DATABASE_URL must be set when serving over HTTP` rather than silently serving an empty local file from a deployment — a failure mode that otherwise surfaces much later as a confusing `unable to open database file`.
 
@@ -323,7 +328,7 @@ For real user identity rather than one shared secret, swap `SharedSecretVerifier
 uv run pytest
 ```
 
-248 tests covering the safety layer, value serialization, read-only enforcement and timeouts, HTTP authentication, inspector, explain, index suggestions, schema health, migration validation, error reporting, and the tool wrappers. Each uses a temporary SQLite database, so the suite needs no credentials and no running server.
+253 tests covering the safety layer, value serialization, read-only enforcement and timeouts, HTTP authentication, inspector, explain, index suggestions, schema health, migration validation, error reporting, and the tool wrappers. Each uses a temporary SQLite database, so the suite needs no credentials and no running server.
 
 SQLite cannot produce the types that break a real driver -- it has no `NUMERIC` and returns `str`/`int` for nearly everything -- so [tests/test_serialization.py](tests/test_serialization.py) exercises `Decimal`, `datetime`, `UUID`, and binary values directly rather than through a query. A PostgreSQL and MySQL test path is the next gap worth closing.
 

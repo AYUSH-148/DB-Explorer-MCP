@@ -214,3 +214,18 @@ def test_validator_rejects_unknown_table(tmp_path: Path):
 
     with pytest.raises(ValueError, match="Table not found: missing"):
         validate_schema(engine, "missing")
+
+
+def test_whole_database_audit_is_paged(tmp_path: Path):
+    database_path = tmp_path / "sample.db"
+    create_sample_database(database_path)
+    engine = create_engine(f"sqlite:///{database_path}")
+
+    first = validate_schema(engine, limit=1)
+    second = validate_schema(engine, limit=1, offset=first["next_offset"])
+
+    assert first["tables_checked"] == ["orders"]
+    assert first["total_matching_tables"] == 2
+    assert first["has_more"] is True
+    assert second["tables_checked"] == ["users"]
+    assert second["has_more"] is False
