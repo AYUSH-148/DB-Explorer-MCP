@@ -1,3 +1,4 @@
+import inspect
 import logging
 from collections.abc import Callable
 from functools import wraps
@@ -35,6 +36,22 @@ mcp = FastMCP(
 engine = create_configured_engine(DATABASE_URL)
 logger = logging.getLogger(__name__)
 
+# One line per tool call: which tool, its arguments, and how it ended. Set up at
+# import rather than in run_server(), because a hosted entrypoint loads
+# server.py:mcp and never calls run_server(). It has its own stderr handler (the
+# stdio transport owns stdout) and does not propagate, so it neither depends on
+# nor duplicates whatever logging the host configures.
+audit_log = logging.getLogger("db_explorer.audit")
+audit_log.setLevel(logging.INFO)
+audit_log.propagate = False
+_audit_handler = logging.StreamHandler()
+_audit_handler.setFormatter(logging.Formatter("%(asctime)s %(name)s %(message)s"))
+audit_log.addHandler(_audit_handler)
+
+# The arguments are caller-supplied, so a single call cannot grow the log by more
+# than this.
+AUDIT_ARGUMENT_LIMIT = 2000
+
 _Params = ParamSpec("_Params")
 _Result = TypeVar("_Result")
 
@@ -43,16 +60,27 @@ def tool_errors(
     function: Callable[_Params, _Result],
 ) -> Callable[_Params, _Result]:
     """Turn a failure into a tool error that says what the caller should do next.
+
+    Every call, whatever its outcome, also writes one audit line: a refused,
+    denied or timed-out query is the one an operator most needs to see.
     """
+    parameter_names = list(inspect.signature(function).parameters)
 
     @wraps(function)
     def wrapper(*args: _Params.args, **kwargs: _Params.kwargs) -> _Result:
+        outcome = "internal_error"
         try:
-            return function(*args, **kwargs)
+            result = function(*args, **kwargs)
+            outcome = "ok"
+            if isinstance(result, dict) and "count" in result:
+                outcome += f" rows={result['count']} truncated={result['truncated']}"
+            return result
         except ToolInputError as error:
+            outcome = error.code
             raise ToolError(error.as_text()) from error
         except SQLAlchemyError as error:
             structured = from_database_error(error, engine_timeout_seconds(engine))
+            outcome = structured.code
             raise ToolError(structured.as_text()) from error
         except Exception as error:
             # Anything else is a bug, and its text can carry driver or file
@@ -67,6 +95,14 @@ def tool_errors(
                 ),
             )
             raise ToolError(unexpected.as_text()) from error
+        finally:
+            arguments = repr({**dict(zip(parameter_names, args)), **kwargs})
+            if len(arguments) > AUDIT_ARGUMENT_LIMIT:
+                arguments = (
+                    f"{arguments[:AUDIT_ARGUMENT_LIMIT]}... "
+                    f"({len(arguments)} chars)"
+                )
+            audit_log.info("%s %s %s", function.__name__, outcome, arguments)
 
     return wrapper
 

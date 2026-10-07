@@ -1,3 +1,4 @@
+import logging
 from pathlib import Path
 
 import pytest
@@ -173,3 +174,32 @@ def test_an_unexpected_error_is_logged_but_not_shown_to_the_caller(
     assert "[internal_error]" in message
     assert "secret" not in message
     assert "secret driver detail" in caplog.text
+
+
+def test_every_tool_call_writes_one_audit_line(
+    configured_engine, monkeypatch, caplog
+):
+    # Enabled at import, not by run_server(): a hosted entrypoint loads
+    # server.py:mcp and never calls run_server().
+    assert server.audit_log.isEnabledFor(logging.INFO)
+    assert server.audit_log.handlers
+    monkeypatch.setattr(server, "engine", configured_engine)
+
+    with caplog.at_level(logging.INFO, logger="db_explorer.audit"):
+        server.execute_query("SELECT name FROM users")
+        for sql in ("DELETE FROM users", "SELECT nosuchcol FROM users"):
+            with pytest.raises(ToolError):
+                server.execute_query(sql)
+        server.suggest_index(query="SELECT * FROM orders WHERE user_id = 1")
+        server.explain_query("SELECT '" + "x" * 5000 + "'")
+
+    lines = [record.getMessage() for record in caplog.records]
+    assert lines[:4] == [
+        "execute_query ok rows=1 truncated=False {'sql': 'SELECT name FROM users'}",
+        "execute_query unsafe_query {'sql': 'DELETE FROM users'}",
+        "execute_query sql_error {'sql': 'SELECT nosuchcol FROM users'}",
+        "suggest_index ok {'query': 'SELECT * FROM orders WHERE user_id = 1'}",
+    ]
+    assert lines[4].startswith("explain_query ok {'sql': \"SELECT 'xxx")
+    assert len(lines[4]) < server.AUDIT_ARGUMENT_LIMIT + 100
+    assert len(lines) == 5
