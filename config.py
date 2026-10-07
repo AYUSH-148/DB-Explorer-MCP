@@ -34,7 +34,7 @@ def _resolve_flag(name: str) -> bool:
 DATABASE_URL = _resolve_database_url()
 MCP_TRANSPORT = os.getenv("MCP_TRANSPORT", "stdio")
 MCP_HOST = os.getenv("MCP_HOST", "127.0.0.1")
-MCP_PORT = int(os.getenv("MCP_PORT", "8000"))
+MCP_PORT = _resolve_int("MCP_PORT", 8000)
 QUERY_TIMEOUT_SECONDS = _resolve_int("QUERY_TIMEOUT_SECONDS", 15)
 # Tool calls run on up to 40 worker threads, but each holds a connection only while
 # it queries. A call that cannot get one within DB_POOL_TIMEOUT_SECONDS fails fast

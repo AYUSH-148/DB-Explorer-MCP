@@ -130,6 +130,12 @@ def select_names(
     return _Page(names[offset:end], kinds, len(names), limit, offset)
 
 
+def _aborted_transaction(error: SQLAlchemyError) -> bool:
+    """Whether Postgres refused a statement because an earlier one failed (25P02)."""
+    orig = getattr(error, "orig", None)
+    return (getattr(orig, "sqlstate", None) or getattr(orig, "pgcode", None)) == "25P02"
+
+
 def _batched(
     names: Sequence[str],
     fetch: Callable[[Sequence[str]], dict[str, Any]],
@@ -139,18 +145,24 @@ def _batched(
     One unreadable relation, such as a view whose base table was dropped, fails
     the whole batched query and would take every healthy relation's listing with
     it. Halving the batch until the failure is down to one name confines it to the
-    relation that has it, which maps to None, and costs about log2(n) extra
-    fetches rather than n. `fetch` must return an entry for every name it is given.
+    relation that has it, which maps to None. One broken relation costs about
+    log2(n) extra fetches; if every relation is broken it costs up to 2n - 1,
+    more than retrying singly would. `fetch` must return an entry for every name
+    it is given.
     ponytail: no savepoint, so on Postgres a failed statement aborts the
-    transaction and the retries fail as well. Postgres refuses to drop a table
+    transaction. The next fetch then raises "transaction aborted", which is
+    re-raised rather than blamed on a relation. Postgres refuses to drop a table
     that a view depends on, so a broken view should not occur there.
     """
     try:
         return fetch(names)
     except SQLAlchemyError as error:
         # A timeout or lost connection fails every relation alike; splitting the
-        # batch cannot help and would blame each relation for it.
-        if from_database_error(error).code != "sql_error":
+        # batch cannot help and would blame each relation for it. The same goes
+        # for a Postgres transaction already aborted by an earlier failure.
+        if _aborted_transaction(error) or (
+            from_database_error(error, log=False).code != "sql_error"
+        ):
             raise
     if len(names) == 1:
         return {names[0]: None}

@@ -130,6 +130,15 @@ def test_the_engines_timeout_is_used_when_none_is_passed(tmp_path: Path):
     assert time.monotonic() - started < 8
 
 
+@pytest.mark.parametrize("url", ["sqlite://", "sqlite:///:memory:"])
+def test_in_memory_sqlite_builds_an_engine(url):
+    # Its pool rejects max_overflow and pool_timeout.
+    engine = create_configured_engine(url)
+
+    with read_only_connection(engine) as connection:
+        assert connection.execute(text("SELECT 1")).scalar_one() == 1
+
+
 def test_exhausted_pool_fails_fast(tmp_path: Path):
     # Past the pool, a call must fail with a pool timeout (reported as server_busy),
     # not wait SQLAlchemy's default 30 seconds.

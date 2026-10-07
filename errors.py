@@ -131,10 +131,11 @@ _MISSING_OBJECT_MARKERS = (
 )
 
 
-def _database_unavailable(detail: str) -> ToolInputError:
+def _database_unavailable(detail: str, log: bool) -> ToolInputError:
     # The driver text carries the host, IP and database user. The operator may read
     # that; the caller of the tool may not, so it goes to the server log only.
-    logger.warning("Database unreachable: %s", detail)
+    if log:
+        logger.warning("Database unreachable: %s", detail)
     return ToolInputError(
         code="database_unavailable",
         message="The server could not reach the database",
@@ -149,8 +150,13 @@ def _database_unavailable(detail: str) -> ToolInputError:
 def from_database_error(
     error: Exception,
     timeout_seconds: int | None = None,
+    log: bool = True,
 ) -> ToolInputError:
-    """Classify a driver error into something the caller can act on."""
+    """Classify a driver error into something the caller can act on.
+
+    Pass log=False to only read the code of an error that will be raised on and
+    classified again, so the connection failure is logged once.
+    """
     detail = str(getattr(error, "orig", None) or error).strip()
     lowered = detail.lower()
 
@@ -164,12 +170,15 @@ def from_database_error(
         )
     # SQLAlchemy leaves statement unset when the failure came from connecting.
     if isinstance(error, DBAPIError) and error.statement is None:
-        return _database_unavailable(detail)
+        return _database_unavailable(detail, log)
 
     # Before the dropped-connection check: a client-side read timeout drops the
     # connection too, but retrying the same slow query unchanged cannot work.
     if any(marker in lowered for marker in _TIMEOUT_MARKERS):
-        bound = f" of {timeout_seconds}s" if timeout_seconds else ""
+        # A client-side read timeout fires at a multiple of the configured limit,
+        # so naming the limit would misstate how long the call actually waited.
+        client_side = "(timed out)" in lowered
+        bound = f" of {timeout_seconds}s" if timeout_seconds and not client_side else ""
         return ToolInputError(
             code="query_timeout",
             message=f"The query exceeded the statement timeout{bound}: {detail}",
@@ -181,7 +190,7 @@ def from_database_error(
 
     # SQLAlchemy flags connection_invalidated when the link dropped mid-statement.
     if isinstance(error, DBAPIError) and error.connection_invalidated:
-        return _database_unavailable(detail)
+        return _database_unavailable(detail, log)
 
     if "duplicate column name" in lowered:
         # MySQL refuses a derived table with repeated names, and every query

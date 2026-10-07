@@ -15,6 +15,7 @@ from typing import Any
 
 from sqlalchemy import Connection, Engine, create_engine, event, text
 from sqlalchemy.engine import make_url
+from sqlalchemy.pool import QueuePool
 
 from config import (
     DB_MAX_OVERFLOW,
@@ -133,13 +134,24 @@ def create_configured_engine(
     pool_timeout: int = DB_POOL_TIMEOUT_SECONDS,
 ) -> Engine:
     """Build an engine with a statement timeout, a bounded pool, and liveness checking."""
-    backend = make_url(url).get_backend_name()
+    parsed = make_url(url)
+    backend = parsed.get_backend_name()
     connect_args = timeout_connect_args(backend, timeout_seconds)
+    # In-memory SQLite uses a pool that has no overflow or wait to configure, and
+    # rejects these arguments.
+    pool_class = parsed.get_dialect().get_pool_class(parsed)
+    pool_options = (
+        {
+            "pool_size": pool_size,
+            "max_overflow": max_overflow,
+            "pool_timeout": pool_timeout,
+        }
+        if issubclass(pool_class, QueuePool)
+        else {}
+    )
     engine = create_engine(
         url,
-        pool_size=pool_size,
-        max_overflow=max_overflow,
-        pool_timeout=pool_timeout,
+        **pool_options,
         pool_pre_ping=True,
         connect_args=connect_args,
         execution_options={TIMEOUT_EXECUTION_OPTION: timeout_seconds},

@@ -201,6 +201,17 @@ def test_a_timeout_is_raised_not_blamed_on_every_relation():
         _batched(["a", "b", "c"], fetch)
 
 
+def test_an_aborted_postgres_transaction_is_raised_not_blamed_on_a_relation():
+    class Aborted(Exception):
+        sqlstate = "25P02"
+
+    def fetch(batch):
+        raise OperationalError("SELECT 1", {}, Aborted("transaction is aborted"))
+
+    with pytest.raises(OperationalError):
+        _batched(["a", "b", "c"], fetch)
+
+
 def test_a_broken_view_asked_for_by_name_reports_instead_of_raising(engine):
     _break_a_view(engine)
 

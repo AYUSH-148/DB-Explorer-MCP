@@ -187,6 +187,8 @@ def test_a_mysql_read_timeout_is_a_slow_query_not_a_lost_connection():
 
     assert error.code == "query_timeout"
     assert "unchanged" not in error.hint
+    # The socket timeout is a multiple of the setting, so the setting is not quoted.
+    assert "15s" not in error.message
 
 
 def test_connection_details_are_logged_not_sent_to_the_caller(caplog):
@@ -202,3 +204,12 @@ def test_connection_details_are_logged_not_sent_to_the_caller(caplog):
     assert "db.internal" not in error.as_text()
     assert "10.0.0.5" not in error.as_text()
     assert "db.internal" in caplog.text
+
+
+def test_classifying_without_logging_leaves_the_log_alone(caplog):
+    refused = OperationalError(None, None, Exception("Connection refused"))
+
+    with caplog.at_level(logging.WARNING, logger="errors"):
+        assert from_database_error(refused, log=False).code == "database_unavailable"
+
+    assert caplog.text == ""
