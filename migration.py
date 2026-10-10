@@ -1,12 +1,11 @@
 from typing import Any
 
 from sqlalchemy import Engine
-from sqlparse import parse
 from sqlparse.tokens import Keyword, Punctuation
 
 from errors import ToolInputError
 from inspector import DEFAULT_TABLE_LIMIT, get_schema_page
-from safety import comment_markers, has_comment
+from safety import comment_markers, has_comment, parse_sql
 
 
 def get_migration_context(
@@ -39,7 +38,7 @@ def _validate_script(script: str, name: str, dialect: str) -> list[str]:
     # A stray ";" parses as its own statement of nothing but punctuation.
     statements = [
         statement
-        for statement in parse(script)
+        for statement in parse_sql(script)
         if any(
             token.ttype not in Punctuation and not token.is_whitespace
             for token in statement.flatten()
@@ -62,6 +61,20 @@ def _validate_script(script: str, name: str, dialect: str) -> list[str]:
 
     statement_types = []
     for statement in statements:
+        # The one syntax check here: a script cut off mid-statement, the usual way
+        # generated SQL goes wrong, leaves a parenthesis open.
+        depth = 0
+        for token in statement.flatten():
+            if token.ttype in Punctuation:
+                depth += {"(": 1, ")": -1}.get(token.value, 0)
+                if depth < 0:
+                    break
+        if depth:
+            raise ToolInputError(
+                code="unparsable_sql",
+                message=f"{name} SQL has unbalanced parentheses",
+                hint="Check that the script is complete; it may have been cut off.",
+            )
         # Every real statement opens with a keyword. This refuses prose such as
         # "hello world" and a parenthesised "(SELECT ...)", which sqlparse types
         # UNKNOWN and would otherwise slip past the SELECT check below. UNKNOWN
@@ -89,7 +102,11 @@ def validate_migration(
     up_sql: str,
     down_sql: str,
 ) -> dict[str, Any]:
-    """Validate migration scripts without executing either script."""
+    """Check migration scripts' shape without executing either script.
+
+    Not a syntax check: only statement types, comments and parentheses are read.
+    The database reports any other error when the script is run.
+    """
     dialect = engine.dialect.name
     up_types = _validate_script(up_sql, "UP", dialect)
     down_types = _validate_script(down_sql, "DOWN", dialect)
@@ -97,5 +114,8 @@ def validate_migration(
         "dialect": dialect,
         "up": {"sql": up_sql.strip(), "statement_types": up_types},
         "down": {"sql": down_sql.strip(), "statement_types": down_types},
-        "execution_note": "Not executed. Review and run manually.",
+        "execution_note": (
+            "Not executed, and not syntax-checked: only statement types, comments "
+            "and parentheses were checked. Review and run manually."
+        ),
     }

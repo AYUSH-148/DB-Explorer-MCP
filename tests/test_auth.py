@@ -2,15 +2,57 @@ import asyncio
 
 import pytest
 
-from auth import MINIMUM_TOKEN_LENGTH, SharedSecretVerifier, build_auth_provider
+from fastmcp import FastMCP
+from starlette.testclient import TestClient
+
+from auth import (
+    MINIMUM_TOKEN_LENGTH,
+    RejectEveryToken,
+    SharedSecretVerifier,
+    build_auth_provider,
+)
 
 
 VALID_TOKEN = "t" * MINIMUM_TOKEN_LENGTH
 
 
-def test_stdio_needs_no_auth_provider():
-    # The client owns the process; there is no network surface to guard.
-    assert build_auth_provider("stdio", "", False) is None
+def test_stdio_without_a_token_refuses_http_requests():
+    # stdio ignores the provider. A host that loads server.py:mcp and serves it
+    # over HTTP never sets MCP_TRANSPORT, so it must not come up unguarded.
+    assert isinstance(build_auth_provider("stdio", "", False), RejectEveryToken)
+
+
+def test_stdio_with_a_token_checks_it_when_served_over_http():
+    provider = build_auth_provider("stdio", VALID_TOKEN, False)
+
+    assert isinstance(provider, SharedSecretVerifier)
+
+
+def test_stdio_opt_out_serves_unauthenticated():
+    assert build_auth_provider("stdio", "", True) is None
+
+
+def test_a_hosted_http_app_without_a_token_answers_401():
+    server = FastMCP("hosted", auth=build_auth_provider("stdio", "", False))
+    initialize = {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": {
+            "protocolVersion": "2025-06-18",
+            "capabilities": {},
+            "clientInfo": {"name": "test", "version": "1"},
+        },
+    }
+
+    with TestClient(server.http_app()) as client:
+        response = client.post(
+            "/mcp",
+            json=initialize,
+            headers={"Accept": "application/json, text/event-stream"},
+        )
+
+    assert response.status_code == 401
 
 
 def test_http_without_a_token_refuses_to_start():
@@ -50,3 +92,7 @@ def test_verifier_rejects_anything_else(wrong):
     verifier = SharedSecretVerifier(VALID_TOKEN)
 
     assert asyncio.run(verifier.verify_token(wrong)) is None
+
+
+def test_reject_every_token_rejects_any_token():
+    assert asyncio.run(RejectEveryToken().verify_token(VALID_TOKEN)) is None

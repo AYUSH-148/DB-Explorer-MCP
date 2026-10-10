@@ -12,11 +12,11 @@ import fnmatch
 from collections.abc import Callable, Sequence
 from typing import Any, NamedTuple
 
-from sqlalchemy import Connection, Engine, inspect, text
+from sqlalchemy import Connection, Engine, inspect
 from sqlalchemy.engine.reflection import Inspector, ObjectKind
 from sqlalchemy.exc import SQLAlchemyError
 
-from db import read_only_connection
+from db import execute_raw, read_only_connection
 from errors import ToolInputError, from_database_error, table_not_found
 from serialization import jsonable, jsonable_rows
 
@@ -255,11 +255,10 @@ def _row_count(connection: Connection, table_name: str) -> tuple[int, bool]:
     Counting a LIMITed subquery stops the scan at the cap on every dialect.
     """
     quoted = connection.dialect.identifier_preparer.quote(table_name)
-    count = connection.execute(
-        text(
-            f"SELECT COUNT(*) FROM (SELECT 1 FROM {quoted} "
-            f"LIMIT {ROW_COUNT_CAP + 1}) AS capped"
-        )
+    count = execute_raw(
+        connection,
+        f"SELECT COUNT(*) FROM (SELECT 1 FROM {quoted} "
+        f"LIMIT {ROW_COUNT_CAP + 1}) AS capped",
     ).scalar_one()
     return min(count, ROW_COUNT_CAP), count > ROW_COUNT_CAP
 
@@ -338,6 +337,6 @@ def get_table_detail(
 
         if include_sample_data:
             quoted = connection.dialect.identifier_preparer.quote(table_name)
-            result = connection.execute(text(f"SELECT * FROM {quoted} LIMIT 3"))
+            result = execute_raw(connection, f"SELECT * FROM {quoted} LIMIT 3")
             details["sample_rows"] = jsonable_rows(result.mappings())
     return details

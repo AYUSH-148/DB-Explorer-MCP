@@ -29,9 +29,22 @@ def _paste_safe_preparer(dialect: Dialect) -> IdentifierPreparer:
 # literal that happens to read "Seq Scan on".
 _PG_SEQ_SCAN = re.compile(r"\s*(->\s*)?(Parallel )?Seq Scan on ")
 
+# SQLite scans that read no table: a constant (SELECT 1, a constant CTE), a VALUES
+# list, a virtual table, or an older SQLite's subquery. No index can serve them.
+_SQLITE_NOT_A_TABLE = re.compile(
+    r"SCAN (CONSTANT ROW|\d+-ROW VALUES CLAUSE|SUBQUERY \d+)|VIRTUAL TABLE"
+)
 
-def _full_scan(dialect: str, plan_row: dict[str, Any]) -> str | None:
-    """Return the plan row's text if it reads a whole table, else None."""
+
+def _full_scan(
+    dialect: str,
+    plan_row: dict[str, Any],
+    derived: frozenset[str] = frozenset(),
+) -> str | None:
+    """Return the plan row's text if it reads a whole table, else None.
+
+    `derived` names SQLite results built earlier in the plan, which are not tables.
+    """
     if dialect == "postgresql":
         # One row per line of the text plan.
         line = str(plan_row.get("QUERY PLAN", ""))
@@ -45,9 +58,27 @@ def _full_scan(dialect: str, plan_row: dict[str, Any]) -> str | None:
             return f"table {table} (access type ALL)"
         return None
     detail = str(plan_row.get("detail", ""))
-    if "SCAN" in detail.upper() and "USING INDEX" not in detail.upper():
-        return detail
-    return None
+    if (
+        "SCAN" not in detail.upper()
+        or "USING INDEX" in detail.upper()
+        or _SQLITE_NOT_A_TABLE.search(detail)
+        or detail.removeprefix("SCAN ") in derived
+    ):
+        return None
+    return detail
+
+
+def _sqlite_derived(plan: list[dict[str, Any]]) -> frozenset[str]:
+    """Names SQLite gives a CTE's or subquery's result before it reads it.
+
+    WITH t AS (...) SELECT * FROM t plans as CO-ROUTINE t, then SCAN t: a scan of
+    a temporary result, like MySQL's <derived2>, not of a table.
+    """
+    return frozenset(
+        detail.split(" ", 1)[1]
+        for row in plan
+        if (detail := str(row.get("detail", ""))).startswith(("CO-ROUTINE ", "MATERIALIZE "))
+    )
 
 
 def suggest_indexes(
@@ -119,8 +150,9 @@ def suggest_indexes(
         }
 
     plan = explain_safe(engine, query or "")
+    derived = _sqlite_derived(plan["plan"])
     for plan_row in plan["plan"]:
-        scan = _full_scan(plan["dialect"], plan_row)
+        scan = _full_scan(plan["dialect"], plan_row, derived)
         if scan:
             recommendations.append(
                 {

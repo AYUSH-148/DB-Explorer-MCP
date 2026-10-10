@@ -101,12 +101,12 @@ Both modes run identical tool code — only `MCP_TRANSPORT` changes.
 | Tool | Arguments | Returns |
 | --- | --- | --- |
 | `explore_schema` | `table_name?`, `include_sample_data=false`, `name_pattern?`, `detail=false`, `limit=200`, `offset=0` | A listing of tables and views (each with a `kind` and column count), or one relation's `kind`, columns, PK, FKs, indexes, row count, and up to 3 sample rows |
-| `execute_query` | `sql`, `row_limit=100` (max 1000) | `columns`, `rows`, `count`, `truncated`, and the effective `row_limit` for one validated `SELECT`; plus `duplicate_columns` and a `note` when a result repeats a column name (the repeats are labelled `id:1`, which is not valid SQL) |
+| `execute_query` | `sql`, `row_limit=100` (max 1000) | `columns`, `rows`, `count`, `truncated`, and the effective `row_limit` for one validated `SELECT`; plus `duplicate_columns` and a `note` when a result repeats a column name (the repeats are labelled `id:1`, which is not valid SQL), and a `note` when rows were cut to stay under the size budget |
 | `explain_query` | `sql` | Native execution plan plus the resolved `dialect` |
 | `validate_schema` | `table_name?`, `name_pattern?`, `limit=200`, `offset=0` | Schema issues with `severity`, `code`, `message`, `suggestion`; without `table_name`, one page of tables (views skipped), paged like `explore_schema` |
 | `suggest_index` | `query?` **xor** `table_name?` | `CREATE INDEX` recommendations with reasons |
 | `migration_context` | `name_pattern?`, `limit=200`, `offset=0` | Dialect plus one page of columns, keys, and indexes (no row counts), for client-side migration drafting; pages like `explore_schema` |
-| `validate_migration` | `up_sql`, `down_sql` | Parsed statement types per script; **never executed** |
+| `validate_migration` | `up_sql`, `down_sql` | Parsed statement types per script; rejects `SELECT`, comments and unbalanced parentheses. Not a syntax check, and **never executed** |
 
 `validate_schema` reports four codes: `missing_primary_key`, `unindexed_foreign_key`, `wide_table` (50+ columns), and `no_indexes`. A foreign key counts as indexed when any index, the primary key, or a unique constraint starts with its columns in order, so a one-to-one child keyed on its parent's id is not reported, and no `CREATE INDEX` is suggested that would duplicate an index the database already built. An index that cannot look rows up by value does not count: a partial index (`WHERE ...`), a PostgreSQL GIN, GiST or BRIN index, or a MySQL `FULLTEXT`/`SPATIAL` key. Suggested `CREATE INDEX` statements quote their names, so they run as written against a table called `order` or a PostgreSQL column called `"UserId"`. On MySQL the quotes are backticks, whatever the server's `sql_mode`, because a suggestion is pasted into another session and double quotes only name an identifier where `ANSI_QUOTES` is on.
 
@@ -140,7 +140,7 @@ The cap is never silent. The wrapper actually asks for `row_limit + 1` rows; if 
 Validation is only the first of three layers, because a keyword blocklist cannot see a query that is syntactically fine and still harmful:
 
 - **A statement timeout.** `SELECT pg_sleep(600)` passes every check above, so time is bounded independently of syntax: `statement_timeout` on PostgreSQL, `max_execution_time` on MySQL, and a progress-handler deadline on SQLite. Configured by `QUERY_TIMEOUT_SECONDS`, applied in [db.py](db.py).
-- **A read-only transaction.** Reads run through `BEGIN READ ONLY` on PostgreSQL, `SET SESSION TRANSACTION READ ONLY` on MySQL, and `PRAGMA query_only` on SQLite. The database refuses the write itself, which is a guarantee the blocklist cannot make.
+- **A read-only transaction.** Reads run through `BEGIN READ ONLY` on PostgreSQL, `START TRANSACTION READ ONLY` on MySQL, and `PRAGMA query_only` on SQLite. The database refuses the write itself, which is a guarantee the blocklist cannot make.
 - **Privileges.** Still the outermost boundary — see [.env.example](.env.example). A `SELECT`-only user is what stops server-side file reads like `pg_read_file()` that no keyword check reliably catches.
 
   Privileges are also where to restrict *what* can be read. The token is all-or-nothing, so anything the database user can `SELECT`, every token holder can read. Hide credentials and PII with grants, not with a server-side table or column blocklist: a parser cannot see the columns behind `SELECT *`, `SELECT u FROM users u`, or `row_to_json(u)`, but the database enforces a grant on all of them.
@@ -181,6 +181,7 @@ Hint: Add a WHERE clause, aggregate instead of scanning, or query a smaller tabl
 | `query_timeout` | The statement hit `QUERY_TIMEOUT_SECONDS` and was cancelled, including a MySQL client-side read timeout (a backstop at twice the limit), or a call that runs many statements spent that budget in total |
 | `database_unavailable` | The server could not reach the database, or the link dropped mid-query. The driver's text names the host and user, so it goes to the server log and not to the caller |
 | `unsafe_query` | Blocked by [safety.py](safety.py). The hint names the specific rule that fired |
+| `query_too_complex` | The SQL is over 50,000 characters, or past what `sqlparse` will parse: about 10,000 tokens in one list (an `IN (...)` of roughly 3,000 values) or 100 levels of nesting. Applies to `validate_migration` scripts too |
 | `invalid_argument` | An argument out of range, such as `row_limit` below 1 |
 | `missing_argument` / `conflicting_arguments` | `suggest_index` needs exactly one of `query` or `table_name` |
 | `comments_not_allowed` / `unparsable_sql` / `select_in_migration` | `validate_migration` rejected a script |
@@ -197,7 +198,7 @@ Requires Python 3.11+ and [uv](https://docs.astral.sh/uv/).
 ```powershell
 uv sync
 uv run python tests/seed_test_db.py   # creates sample.db
-uv run pytest                         # 267 tests on SQLite; 18 more with TEST_*_URL set
+uv run pytest                         # 302 tests on SQLite; 20 more with TEST_*_URL set
 uv run server.py                      # stdio transport
 ```
 
@@ -302,7 +303,7 @@ To watch the guardrails work, ask it to run `DELETE FROM users`. The call fails 
 
 | Variable | Default | Notes |
 | --- | --- | --- |
-| `DATABASE_URL` | `sqlite:///sample.db` (stdio only) | **Required** when `MCP_TRANSPORT` is not `stdio`; startup fails loudly otherwise |
+| `DATABASE_URL` | `sample.db` next to `config.py`, read-only (stdio only) | **Required** when `MCP_TRANSPORT` is not `stdio`; startup fails loudly otherwise |
 | `MCP_TRANSPORT` | `stdio` | `stdio`, `streamable-http`, or `sse` |
 | `MCP_HOST` | `127.0.0.1` | HTTP transports only |
 | `MCP_PORT` | `8000` | HTTP transports only |
@@ -310,12 +311,12 @@ To watch the guardrails work, ask it to run `DELETE FROM users`. The call fails 
 | `DB_POOL_SIZE` | `5` | Connections kept open to the database |
 | `DB_MAX_OVERFLOW` | `10` | Extra connections opened under load, closed when returned |
 | `DB_POOL_TIMEOUT_SECONDS` | `5` | How long a call waits for a free connection before failing with `server_busy` |
-| `MCP_AUTH_TOKEN` | — | **Required** when `MCP_TRANSPORT` is not `stdio`. Minimum 32 characters |
-| `MCP_ALLOW_UNAUTHENTICATED` | `false` | Explicit opt-out of the token requirement, for trusted networks only |
+| `MCP_AUTH_TOKEN` | — | **Required** when serving over HTTP, including a host that loads `server.py:mcp` itself. Minimum 32 characters |
+| `MCP_ALLOW_UNAUTHENTICATED` | `false` | Explicit opt-out of the token requirement, for trusted networks or a host whose own authentication sits in front (Horizon) |
 
 Tool calls run on up to 40 worker threads, but the pool allows at most `DB_POOL_SIZE + DB_MAX_OVERFLOW` (15 by default) at once. A call past that waits `DB_POOL_TIMEOUT_SECONDS`, then fails with `server_busy` so the client can retry. Raise the pool toward 40 for heavier HTTP traffic, but keep it under the database's connection limit (`max_connections`), counted across every server instance.
 
-The sqlite fallback exists for local development only. [config.py](config.py) raises `RuntimeError: DATABASE_URL must be set when serving over HTTP` rather than silently serving an empty local file from a deployment — a failure mode that otherwise surfaces much later as a confusing `unable to open database file`.
+The sqlite fallback exists for local development only. It points at `sample.db` next to [config.py](config.py), not in the working directory, because an MCP client picks that directory and SQLite would otherwise create an empty database there and report no tables. It is opened with `mode=ro`, so the operating system refuses writes and a missing file is an error rather than a new empty one. The seed scripts write to the same place wherever they are run from. [config.py](config.py) raises `RuntimeError: DATABASE_URL must be set when serving over HTTP` rather than silently serving an empty local file from a deployment — a failure mode that otherwise surfaces much later as a confusing `unable to open database file`.
 
 `.env` is loaded at startup by [config.py](config.py), so copying `.env.example` to `.env` works as that file instructs. The file next to `config.py` is read first and a `.env` in the working directory second, because an MCP client launches this server with a working directory you do not control. Real environment variables always win over both, so a host's secret store overrides the file without editing it. `.env` stays gitignored.
 
@@ -332,6 +333,10 @@ uv run server.py
 
 An HTTP endpoint publishes SELECT on the configured database to anyone who can reach the port, so the server **fails to start** without `MCP_AUTH_TOKEN` rather than coming up unprotected. Clients send it as `Authorization: Bearer <token>`; it is compared in constant time in [auth.py](auth.py). Set `MCP_ALLOW_UNAUTHENTICATED=true` to override on a genuinely trusted network — the server then warns on stderr at every startup.
 
+A host that loads `server.py:mcp` directly (Horizon, `fastmcp run server.py:mcp --transport http`) never sets `MCP_TRANSPORT`, so the server cannot tell at import that it will serve HTTP. It does not start unprotected: without `MCP_AUTH_TOKEN` or `MCP_ALLOW_UNAUTHENTICATED=true` every HTTP request is answered `401`. stdio ignores the provider, so local use needs neither.
+
+Host and Origin headers are checked on a server bound to a loopback address, so a web page you visit cannot reach a local server through DNS rebinding (`421` for a foreign `Host`, `403` for a foreign `Origin`). FastMCP ships this check off; [server.py](server.py) turns it on unless `FASTMCP_HTTP_HOST_ORIGIN_PROTECTION` is set.
+
 For real user identity rather than one shared secret, swap `SharedSecretVerifier` for one of FastMCP's OAuth providers. See [DEPLOYMENT.md](DEPLOYMENT.md) for FastMCP Cloud / Prefect Horizon deployment, where OAuth 2.0 with dynamic client registration and PKCE is handled by the platform.
 
 **Hosted Supabase note:** direct connections (`db.<ref>.supabase.co`) are IPv6-only, which fails from IPv4-only containers with an empty-looking `psycopg2.OperationalError`. Use the pooler host from the dashboard's *Connect* panel, and note that the username becomes `postgres.<project-ref>`.
@@ -342,7 +347,7 @@ For real user identity rather than one shared secret, swap `SharedSecretVerifier
 uv run pytest
 ```
 
-267 tests covering the safety layer, value serialization, read-only enforcement and timeouts, HTTP authentication, inspector, explain, index suggestions, schema health, migration validation, error reporting, and the tool wrappers. Each uses a temporary SQLite database, so the suite needs no credentials and no running server.
+302 tests covering the safety layer, value serialization, read-only enforcement and timeouts, HTTP authentication, inspector, explain, index suggestions, schema health, migration validation, error reporting, and the tool wrappers. Each uses a temporary SQLite database, so the suite needs no credentials and no running server.
 
 SQLite cannot produce the types that break a real driver -- it has no `NUMERIC` and returns `str`/`int` for nearly everything -- so [tests/test_serialization.py](tests/test_serialization.py) exercises `Decimal`, `datetime`, `UUID`, and binary values directly rather than through a query. [tests/test_live_databases.py](tests/test_live_databases.py) covers what SQLite cannot: the read-only transaction, the server-side statement timeout, `NUMERIC`/`TIMESTAMP` values, and catalog reflection, against real PostgreSQL and MySQL. Set `TEST_POSTGRES_URL` and/or `TEST_MYSQL_URL` (a throwaway database: the tests create and drop `dbx_live_*` tables) to run it; unset, it is skipped. CI runs both against service containers.
 
@@ -376,6 +381,8 @@ tests/            pytest suite over temporary SQLite databases
 - **A few read-only statements are rejected for lack of a statement type.** `sqlparse` reports `UNKNOWN` for a parenthesized `(SELECT 1)`, for `VALUES (1)` and for `TABLE users`, and the type check refuses anything that is not `SELECT`. All are harmless; none is currently accepted.
 
   This is left as a rejection rather than fixed by unwrapping, because the incidence is near zero — a caller writes the plain `SELECT` — and widening what the parser accepts to serve a query nobody sends is a poor trade against the risk. What *was* fixed is the explanation: these reasons and a genuine write both contain `Only SELECT`, so they used to collapse to the same hint, and a caller that sent a read was told the server is read-only and pointed at `validate_migration`. `Got: UNKNOWN` now carries its own hint naming the shapes that cause it. A rejection the caller can recover from in one turn is an acceptable cost; a rejection that misdiagnoses itself is not.
+- **SQL is capped at 50,000 characters before parsing.** `sqlparse` spends about 0.9 s of CPU on 50 KB of dense SQL such as a long `IN (...)` list and about 2.7 s on 100 KB, and refuses more than 10,000 tokens in one list long before either, so the cap costs nothing a query could have used. Past either limit the call fails with `query_too_complex` rather than `internal_error`.
 - **The row cap is a context guard, not a performance guard.** A heavy aggregate still runs in full on the database before its output is limited. `QUERY_TIMEOUT_SECONDS` is what bounds the cost of that work.
+- **Long text is cut, and so is a large result.** `row_limit` bounds rows, not bytes, so one 5 MB text cell used to arrive whole. A text value over 2000 characters arrives as its first 2000 followed by `... [truncated: N characters in total]`, in `execute_query`, `explain_query` and `explore_schema` sample rows alike. `execute_query` also stops adding rows once the result passes 500,000 bytes, sets `truncated`, and says in `note` that a higher `row_limit` will not help. The first row is always kept.
 - **Binary columns are summarised, not returned.** Values up to 256 bytes arrive hex-encoded, which suits `BINARY(16)` UUIDs and digests; anything larger is reported as a size only. Inlining a multi-megabyte blob would consume the context window it was sent to.
 - **Wide `NUMERIC` values arrive as strings.** A decimal that fits a float is a JSON number so it sorts and compares correctly; one that does not keeps its exact digits rather than being silently rounded.

@@ -2,7 +2,9 @@ import logging
 from pathlib import Path
 
 import pytest
+from fastmcp import FastMCP
 from fastmcp.exceptions import ToolError
+from starlette.testclient import TestClient
 from sqlalchemy import create_engine
 
 import server
@@ -203,3 +205,18 @@ def test_every_tool_call_writes_one_audit_line(
     assert lines[4].startswith("explain_query ok {'sql': \"SELECT 'xxx")
     assert len(lines[4]) < server.AUDIT_ARGUMENT_LIMIT + 100
     assert len(lines) == 5
+
+
+def test_a_loopback_http_server_refuses_a_foreign_origin():
+    # DNS rebinding: a page on evil.example posting to the user's localhost server.
+    # FastMCP leaves this check off unless server.py turns it on.
+    app = FastMCP("rebinding").http_app()
+
+    with TestClient(app, base_url="http://127.0.0.1:8000") as client:
+        response = client.post(
+            "/mcp",
+            json={},
+            headers={"Origin": "http://evil.example"},
+        )
+
+    assert response.status_code == 403

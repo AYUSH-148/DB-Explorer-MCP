@@ -7,7 +7,12 @@ from uuid import UUID
 
 import pytest
 
-from serialization import MAX_INLINE_BINARY_BYTES, jsonable, jsonable_rows
+from serialization import (
+    MAX_INLINE_BINARY_BYTES,
+    MAX_INLINE_TEXT_CHARS,
+    jsonable,
+    jsonable_rows,
+)
 
 
 class Colour(Enum):
@@ -98,3 +103,17 @@ def test_converted_rows_are_json_serializable():
 
     # The whole point: this raised TypeError before, taking the tool call with it.
     assert json.dumps(jsonable_rows(rows))
+
+
+def test_text_up_to_the_cap_is_returned_whole():
+    value = "x" * MAX_INLINE_TEXT_CHARS
+
+    assert jsonable(value) == value
+
+
+def test_long_text_is_cut_and_marked():
+    # row_limit bounds rows, not bytes: one 5 MB cell used to arrive whole.
+    result = jsonable("x" * 5_000_000)
+
+    assert result.startswith("x" * MAX_INLINE_TEXT_CHARS + "...")
+    assert result.endswith("[truncated: 5000000 characters in total]")

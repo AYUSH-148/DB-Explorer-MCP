@@ -1,8 +1,8 @@
 from typing import Any
 
-from sqlalchemy import Engine, text
+from sqlalchemy import Engine
 
-from db import read_only_connection
+from db import execute_raw, read_only_connection
 from errors import unsafe_query
 from safety import validate_query
 from serialization import jsonable_rows
@@ -19,7 +19,7 @@ def explain_safe(engine: Engine, sql: str) -> dict[str, Any]:
     explain_sql = f"{prefix} {query}"
 
     with read_only_connection(engine) as connection:
-        result = connection.execute(text(explain_sql))
+        result = execute_raw(connection, explain_sql)
         rows = jsonable_rows(result.mappings())
         columns = list(result.keys())
 

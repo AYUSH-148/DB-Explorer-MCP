@@ -26,3 +26,9 @@ def test_explain_safe_returns_sqlite_plan(engine):
 def test_explain_safe_rejects_mutating_query(engine):
     with pytest.raises(ValueError, match="Unsafe query blocked"):
         explain_safe(engine, "DELETE FROM users")
+
+
+def test_explain_safe_accepts_a_colon_inside_a_literal(engine):
+    result = explain_safe(engine, "SELECT id FROM users WHERE name = 'Bo :tag'")
+
+    assert result["plan"]

@@ -1,7 +1,7 @@
 """The same guarantees as the SQLite suite, checked against real PostgreSQL and MySQL.
 
 SQLite cannot exercise the code paths that differ per dialect: BEGIN READ ONLY,
-SET SESSION TRANSACTION READ ONLY, statement_timeout, max_execution_time, NUMERIC
+START TRANSACTION READ ONLY, statement_timeout, max_execution_time, NUMERIC
 values, or catalog reflection. Each backend runs only when its URL is set:
 
     TEST_POSTGRES_URL=postgresql+psycopg2://user:pass@host:5432/db
@@ -164,6 +164,15 @@ def test_driver_values_are_serialized_and_the_row_cap_holds(engine):
 
 def test_explain_returns_a_plan(engine):
     assert explain_safe(engine, "SELECT name FROM dbx_live_users")["plan"]
+
+
+def test_colons_and_percents_in_a_literal_reach_the_database_untouched(engine):
+    # :name is SQLAlchemy's placeholder; %s is psycopg2's and pymysql's.
+    literal = '50% off :tag {"paid":true}'
+    sql = f"SELECT '{literal}' AS value FROM dbx_live_users WHERE id = 1"
+
+    assert execute_safe(engine, sql)["rows"] == [{"value": literal}]
+    assert explain_safe(engine, sql)["plan"]
 
 
 def test_table_detail_reflects_keys(engine):
