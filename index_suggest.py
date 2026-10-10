@@ -1,10 +1,11 @@
+import re
 from typing import Any
 
 from sqlalchemy import Engine, inspect
 from sqlalchemy.engine.interfaces import Dialect
 from sqlalchemy.sql.compiler import IdentifierPreparer
 
-from db import read_only_connection
+from db import MYSQL_BACKENDS, read_only_connection
 from errors import ToolInputError, table_not_found
 from explain import explain_safe
 from indexes import reflect_coverage
@@ -19,9 +20,34 @@ def _paste_safe_preparer(dialect: Dialect) -> IdentifierPreparer:
     and the statement is a syntax error. Backticks quote an identifier in
     every MySQL session, whatever its sql_mode.
     """
-    if dialect.name in {"mysql", "mariadb"}:
+    if dialect.name in MYSQL_BACKENDS:
         return dialect.preparer(dialect, server_ansiquotes=False)
     return dialect.identifier_preparer
+
+
+# A plan node, not text elsewhere on the line: a Filter line can quote a string
+# literal that happens to read "Seq Scan on".
+_PG_SEQ_SCAN = re.compile(r"\s*(->\s*)?(Parallel )?Seq Scan on ")
+
+
+def _full_scan(dialect: str, plan_row: dict[str, Any]) -> str | None:
+    """Return the plan row's text if it reads a whole table, else None."""
+    if dialect == "postgresql":
+        # One row per line of the text plan.
+        line = str(plan_row.get("QUERY PLAN", ""))
+        return line.strip() if _PG_SEQ_SCAN.match(line) else None
+    if dialect in MYSQL_BACKENDS:
+        # One row per table read; access type ALL is a full table scan. Names in
+        # angle brackets (<derived2>, <union1,2>) are the server's temporary
+        # tables, which no index can serve.
+        table = str(plan_row.get("table") or "")
+        if plan_row.get("type") == "ALL" and not table.startswith("<"):
+            return f"table {table} (access type ALL)"
+        return None
+    detail = str(plan_row.get("detail", ""))
+    if "SCAN" in detail.upper() and "USING INDEX" not in detail.upper():
+        return detail
+    return None
 
 
 def suggest_indexes(
@@ -94,12 +120,12 @@ def suggest_indexes(
 
     plan = explain_safe(engine, query or "")
     for plan_row in plan["plan"]:
-        detail = str(plan_row.get("detail", ""))
-        if "SCAN" in detail.upper() and "USING INDEX" not in detail.upper():
+        scan = _full_scan(plan["dialect"], plan_row)
+        if scan:
             recommendations.append(
                 {
                     "sql": None,
-                    "reason": f"Execution plan contains a full scan: {detail}",
+                    "reason": f"Execution plan contains a full scan: {scan}",
                 }
             )
 

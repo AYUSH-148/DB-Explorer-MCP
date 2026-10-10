@@ -7,13 +7,13 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ```powershell
 uv sync                                # install deps
 uv run python tests/seed_test_db.py    # (re)create sample.db
-uv run pytest                          # run all 258 tests
+uv run pytest                          # 267 SQLite tests; 18 live tests skip unless TEST_*_URL is set
 uv run pytest tests/test_safety.py     # run one test file
 uv run pytest tests/test_safety.py::test_name -v   # run a single test
 uv run server.py                       # start server, stdio transport
 ```
 
-No lint/format command is configured in `pyproject.toml`.
+`uv run ruff check .` lints (bug-catching rules only, see `[tool.ruff.lint]` in `pyproject.toml`). CI (`.github/workflows/ci.yml`) runs ruff and pytest on every push to `main` and every PR.
 
 To run over HTTP locally, set `MCP_TRANSPORT=streamable-http` (plus `MCP_HOST`/`MCP_PORT`/`MCP_AUTH_TOKEN`) before `uv run server.py` — see README "Serve over HTTP".
 
@@ -32,7 +32,7 @@ Safety validation is layer one of three — `db.py` adds a statement timeout (`Q
 - `db.py` — engine construction, timeouts, read-only transaction setup
 - `inspector.py` — schema reflection (columns, PK, FKs, indexes, row counts, samples) via SQLAlchemy `inspect()`. Lists views and materialized views alongside tables, each tagged with a `kind`
 - `explain.py` — dialect-aware `EXPLAIN` / `EXPLAIN QUERY PLAN`
-- `index_suggest.py` — index recommendations from a live plan (SQLite-tuned) or FK metadata (works on every dialect)
+- `index_suggest.py` — index recommendations from a live plan (full-scan detection for SQLite, PostgreSQL, MySQL) or FK metadata (works on every dialect)
 - `schema_health.py` — objective schema audit (`missing_primary_key`, `unindexed_foreign_key`, `wide_table`, `no_indexes`)
 - `indexes.py` — which indexes can serve a foreign key, shared by `schema_health.py` and `index_suggest.py`. Counts the implicit PRIMARY KEY and UNIQUE indexes that `get_indexes()` omits; ignores partial, GIN/GiST/BRIN and FULLTEXT/SPATIAL indexes. Reads UNIQUE through SQLite's auto-indexes rather than `get_unique_constraints()`, which raises `NotImplementedError` on SQL Server and drops constraints whose case differs on SQLite.
 - `migration.py` — returns schema context and validates `up`/`down` SQL statement types; **never executes DDL**
@@ -45,4 +45,4 @@ Transports (stdio vs. streamable-http) run identical tool code; only `MCP_TRANSP
 
 ## Testing notes
 
-All 258 tests run against a temporary SQLite database — no credentials, no running server, no network. SQLite can't produce the driver types that matter for correctness (no `NUMERIC`, returns `str`/`int` for nearly everything), so `tests/test_serialization.py` exercises `Decimal`/`datetime`/`UUID`/binary directly rather than through a query. There is currently no PostgreSQL/MySQL test path.
+Without `TEST_POSTGRES_URL` / `TEST_MYSQL_URL`, the 267 tests that run use a temporary SQLite database — no credentials, no running server, no network. SQLite can't produce the driver types that matter for correctness (no `NUMERIC`, returns `str`/`int` for nearly everything), so `tests/test_serialization.py` exercises `Decimal`/`datetime`/`UUID`/binary directly rather than through a query. `tests/test_live_databases.py` runs the dialect-specific paths (read-only transaction, statement timeout, NUMERIC/TIMESTAMP serialization, reflection) against real PostgreSQL and MySQL when `TEST_POSTGRES_URL` / `TEST_MYSQL_URL` are set, and skips otherwise. CI sets both via service containers. It creates and drops `dbx_live_*` tables, so only point it at a throwaway database.

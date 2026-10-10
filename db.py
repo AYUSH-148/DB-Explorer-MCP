@@ -29,6 +29,9 @@ _deadline = threading.local()
 
 _SQLITE_PROGRESS_INSTRUCTIONS = 1_000
 
+# MariaDB has its own SQLAlchemy dialect name but takes the MySQL statements here.
+MYSQL_BACKENDS = frozenset({"mysql", "mariadb"})
+
 # Where create_configured_engine records the timeout it built the engine with.
 TIMEOUT_EXECUTION_OPTION = "db_explorer_timeout_seconds"
 
@@ -111,7 +114,7 @@ def timeout_connect_args(backend: str, timeout_seconds: int) -> dict[str, Any]:
             "connect_timeout": timeout_seconds,
             "options": f"-c statement_timeout={timeout_seconds * 1000}",
         }
-    if backend == "mysql":
+    if backend in MYSQL_BACKENDS:
         # The server-side max_execution_time set in _install_mysql_timeout is what
         # cancels a slow query. A socket timeout only abandons it, leaving the
         # server still running it, so keep it well above as a backstop for a
@@ -160,7 +163,7 @@ def create_configured_engine(
     _install_request_deadline(engine)
     if backend == "sqlite":
         _install_sqlite_deadline(engine)
-    elif backend == "mysql":
+    elif backend in MYSQL_BACKENDS:
         _install_mysql_timeout(engine, timeout_seconds)
     return engine
 
@@ -173,14 +176,15 @@ def _begin_read_only(connection: Connection) -> None:
         connection.execution_options(postgresql_readonly=True)
     elif backend == "sqlite":
         connection.execute(text("PRAGMA query_only = ON"))
-    elif backend == "mysql":
-        connection.execute(text("SET SESSION TRANSACTION READ ONLY"))
-        # The access mode applies to the next transaction, so end the implicit one
-        # the statement above opened.
-        connection.rollback()
+    elif backend in MYSQL_BACKENDS:
+        # Scoped to this one transaction, which read_only_connection always ends
+        # with a rollback, so nothing is left on the session to reset.
+        connection.exec_driver_sql("START TRANSACTION READ ONLY")
 
 
 def _end_read_only(connection: Connection) -> None:
+    # Only SQLite's mode outlives the transaction; Postgres and MySQL scope theirs
+    # to it.
     if connection.engine.dialect.name != "sqlite":
         return
     try:
@@ -201,9 +205,10 @@ def read_only_connection(
     if timeout_seconds is None:
         timeout_seconds = engine_timeout_seconds(engine)
     with engine.connect() as connection:
-        _begin_read_only(connection)
-        _deadline.value = time.monotonic() + timeout_seconds
         try:
+            # Inside the try, so a mode set before a later failure is still reset.
+            _begin_read_only(connection)
+            _deadline.value = time.monotonic() + timeout_seconds
             yield connection
         finally:
             _deadline.value = None

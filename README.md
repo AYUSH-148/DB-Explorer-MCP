@@ -197,7 +197,7 @@ Requires Python 3.11+ and [uv](https://docs.astral.sh/uv/).
 ```powershell
 uv sync
 uv run python tests/seed_test_db.py   # creates sample.db
-uv run pytest                         # 258 tests, no external database needed
+uv run pytest                         # 267 tests on SQLite; 18 more with TEST_*_URL set
 uv run server.py                      # stdio transport
 ```
 
@@ -342,9 +342,9 @@ For real user identity rather than one shared secret, swap `SharedSecretVerifier
 uv run pytest
 ```
 
-258 tests covering the safety layer, value serialization, read-only enforcement and timeouts, HTTP authentication, inspector, explain, index suggestions, schema health, migration validation, error reporting, and the tool wrappers. Each uses a temporary SQLite database, so the suite needs no credentials and no running server.
+267 tests covering the safety layer, value serialization, read-only enforcement and timeouts, HTTP authentication, inspector, explain, index suggestions, schema health, migration validation, error reporting, and the tool wrappers. Each uses a temporary SQLite database, so the suite needs no credentials and no running server.
 
-SQLite cannot produce the types that break a real driver -- it has no `NUMERIC` and returns `str`/`int` for nearly everything -- so [tests/test_serialization.py](tests/test_serialization.py) exercises `Decimal`, `datetime`, `UUID`, and binary values directly rather than through a query. A PostgreSQL and MySQL test path is the next gap worth closing.
+SQLite cannot produce the types that break a real driver -- it has no `NUMERIC` and returns `str`/`int` for nearly everything -- so [tests/test_serialization.py](tests/test_serialization.py) exercises `Decimal`, `datetime`, `UUID`, and binary values directly rather than through a query. [tests/test_live_databases.py](tests/test_live_databases.py) covers what SQLite cannot: the read-only transaction, the server-side statement timeout, `NUMERIC`/`TIMESTAMP` values, and catalog reflection, against real PostgreSQL and MySQL. Set `TEST_POSTGRES_URL` and/or `TEST_MYSQL_URL` (a throwaway database: the tests create and drop `dbx_live_*` tables) to run it; unset, it is skipped. CI runs both against service containers.
 
 ## Project layout
 
@@ -368,7 +368,8 @@ tests/            pytest suite over temporary SQLite databases
 ## Design notes and limits
 
 - **Migrations are never executed.** The server returns schema context and validates scripts; you run the DDL. That keeps the connection read-only in practice, not just by policy.
-- **Query-mode `suggest_index` is tuned to SQLite plan output**, which exposes a `detail` column containing `SCAN`. On PostgreSQL and MySQL the plan is still returned in full, but automatic recommendations will usually be empty — use `table_name` mode there, which works from foreign-key metadata on every dialect.
+- **Query-mode `suggest_index` flags full table scans, not missing indexes in general.** It reads the plan each dialect returns: a `SCAN` without an index on SQLite, `Seq Scan on` on PostgreSQL, access type `ALL` on MySQL. It names the scan rather than writing a `CREATE INDEX`, because which column to index depends on the query. A planner also scans a small table on purpose, so a scan on a table of a few rows is expected, not a problem. Other dialects get the plan and no recommendations.
+- **Only the default schema is inspected.** `explore_schema`, `validate_schema`, `suggest_index` and `migration_context` see the tables of one schema: on PostgreSQL the first schema on the `search_path` (usually `public`), on MySQL the database named in `DATABASE_URL`. A table in another schema, such as `billing.invoices`, is missing from every listing and reported as not found by name, though `execute_query` still reads it when the SQL names the schema. To inspect a different PostgreSQL schema instead, make it the connecting role's first schema: `ALTER ROLE explorer SET search_path = billing, public;`.
 - **The keyword denylist matches whole tokens, not substrings**, so a keyword that merely contains a blocked word is unaffected: `GROUPING SETS` and `SELECT grant_date FROM permissions` both pass, where a naive `"SET" in sql` check would reject the first and `"GRANT" in sql` the second.
 - **Each denylist entry has to earn its place.** `INTO` does: `SELECT * INTO archive FROM users` has statement type `SELECT` but creates a table, so only the keyword scan catches it. `SET` did not, and was removed — every statement that changes session state (`SET ROLE`, `SET search_path`, even `SET x = (SELECT 1)`) parses as type `UNKNOWN` and is refused by the type check, while `UPDATE ... SET` inside a data-modifying CTE is caught by `UPDATE`. All it added was rejecting `SELECT set FROM config`, since `sqlparse` types a bare `set` as a keyword rather than a column name.
 - **Four of the twelve entries are load-bearing** — `INSERT`, `UPDATE`, `DELETE` and `INTO` are reachable in a statement whose type is `SELECT`, the first three through Postgres data-modifying CTEs. The rest are redundant, because a CTE accepts only `INSERT`, `UPDATE`, `DELETE` and `MERGE`, never DDL: no legal `SELECT`-typed statement can contain `DROP`. They stay as a second line if `sqlparse` type detection ever regresses.
