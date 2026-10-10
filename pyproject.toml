@@ -16,8 +16,13 @@ dependencies = [
 [dependency-groups]
 dev = [
     "pytest>=8.0.0",
+    "ruff>=0.15.0",
 ]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]
+
+[tool.ruff.lint]
+# Bug-catching rules only (syntax errors, undefined names, unused imports).
+select = ["E4", "E7", "E9", "F"]

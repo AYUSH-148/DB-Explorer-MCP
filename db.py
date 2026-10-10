@@ -175,20 +175,26 @@ def _begin_read_only(connection: Connection) -> None:
         connection.execute(text("PRAGMA query_only = ON"))
     elif backend == "mysql":
         connection.execute(text("SET SESSION TRANSACTION READ ONLY"))
-        # The access mode applies to the next transaction, so end the implicit one
-        # the statement above opened.
+        # The access mode holds for every later transaction on this session, but not
+        # the current one, so end the implicit one the statement above opened.
+        # _end_read_only switches it back before the connection returns to the pool.
         connection.rollback()
 
 
 def _end_read_only(connection: Connection) -> None:
-    if connection.engine.dialect.name != "sqlite":
+    # Both settings live on the connection, which is going back to the pool.
+    # Postgres needs nothing: BEGIN READ ONLY ends with its transaction.
+    reset = {
+        "sqlite": "PRAGMA query_only = OFF",
+        "mysql": "SET SESSION TRANSACTION READ WRITE",
+    }.get(connection.engine.dialect.name)
+    if reset is None:
         return
     try:
-        # query_only lives on the connection, which is going back to the pool.
-        connection.exec_driver_sql("PRAGMA query_only = OFF")
+        connection.exec_driver_sql(reset)
     except Exception:
         # An aborted statement can leave the connection unusable; the pool will
-        # discard it. Failing to reset a pragma must not mask the real error.
+        # discard it. Failing to reset the mode must not mask the real error.
         pass
 
 

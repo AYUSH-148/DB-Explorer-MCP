@@ -24,6 +24,23 @@ def _paste_safe_preparer(dialect: Dialect) -> IdentifierPreparer:
     return dialect.identifier_preparer
 
 
+def _full_scan(dialect: str, plan_row: dict[str, Any]) -> str | None:
+    """Return the plan row's text if it reads a whole table, else None."""
+    if dialect == "postgresql":
+        # One row per line of the text plan; "Parallel Seq Scan on" matches too.
+        line = str(plan_row.get("QUERY PLAN", ""))
+        return line.strip() if "Seq Scan on" in line else None
+    if dialect == "mysql":
+        # One row per table read; access type ALL is a full table scan.
+        if plan_row.get("type") == "ALL":
+            return f"table {plan_row.get('table')} (access type ALL)"
+        return None
+    detail = str(plan_row.get("detail", ""))
+    if "SCAN" in detail.upper() and "USING INDEX" not in detail.upper():
+        return detail
+    return None
+
+
 def suggest_indexes(
     engine: Engine,
     query: str | None = None,
@@ -94,12 +111,12 @@ def suggest_indexes(
 
     plan = explain_safe(engine, query or "")
     for plan_row in plan["plan"]:
-        detail = str(plan_row.get("detail", ""))
-        if "SCAN" in detail.upper() and "USING INDEX" not in detail.upper():
+        scan = _full_scan(plan["dialect"], plan_row)
+        if scan:
             recommendations.append(
                 {
                     "sql": None,
-                    "reason": f"Execution plan contains a full scan: {detail}",
+                    "reason": f"Execution plan contains a full scan: {scan}",
                 }
             )
 
