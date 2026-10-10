@@ -1,7 +1,7 @@
 """The same guarantees as the SQLite suite, checked against real PostgreSQL and MySQL.
 
 SQLite cannot exercise the code paths that differ per dialect: BEGIN READ ONLY,
-SET SESSION TRANSACTION READ ONLY, statement_timeout, max_execution_time, NUMERIC
+START TRANSACTION READ ONLY, statement_timeout, max_execution_time, NUMERIC
 values, or catalog reflection. Each backend runs only when its URL is set:
 
     TEST_POSTGRES_URL=postgresql+psycopg2://user:pass@host:5432/db

@@ -210,7 +210,12 @@ def migration_context(
 @mcp.tool
 @tool_errors
 def validate_migration(up_sql: str, down_sql: str) -> dict[str, Any]:
-    """Validate migration scripts without executing them."""
+    """Check migration scripts without executing them.
+
+    Reports each statement's type and rejects SELECT, comments and unbalanced
+    parentheses. It does not check syntax: the database reports other errors when
+    the script is run.
+    """
     return validate_migration_data(engine, up_sql, down_sql)
 
 

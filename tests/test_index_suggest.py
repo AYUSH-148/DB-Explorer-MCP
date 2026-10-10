@@ -155,7 +155,30 @@ def test_suggest_indexes_requires_one_input(engine):
         ("mysql", {"table": "<derived2>", "type": "ALL"}, False),
         ("mysql", {"table": "<union1,2>", "type": "ALL"}, False),
         ("mariadb", {"table": "users", "type": "ALL"}, True),
+        ("sqlite", {"detail": "SCAN users"}, True),
+        ("sqlite", {"detail": "SEARCH users USING INDEX ix_name (name=?)"}, False),
+        # Read no table, so no index can serve them.
+        ("sqlite", {"detail": "SCAN CONSTANT ROW"}, False),
+        ("sqlite", {"detail": "SCAN 2-ROW VALUES CLAUSE"}, False),
+        ("sqlite", {"detail": "SCAN json_each VIRTUAL TABLE INDEX 1:"}, False),
+        ("sqlite", {"detail": "SCAN SUBQUERY 1"}, False),
     ],
 )
 def test_full_scan_reads_each_dialects_plan(dialect, plan_row, flagged):
     assert (index_suggest._full_scan(dialect, plan_row) is not None) is flagged
+
+
+def test_query_mode_ignores_a_constant_cte(engine):
+    # Planned as CO-ROUTINE t, SCAN CONSTANT ROW, SCAN t: no table is read.
+    result = suggest_indexes(engine, query="WITH t AS (SELECT 1 AS x) SELECT * FROM t")
+
+    assert result["recommendations"] == []
+
+
+def test_query_mode_still_flags_the_table_a_subquery_reads(engine):
+    result = suggest_indexes(
+        engine, query="SELECT * FROM (SELECT name FROM users LIMIT 5) AS s"
+    )
+
+    reasons = [item["reason"] for item in result["recommendations"]]
+    assert reasons == ["Execution plan contains a full scan: SCAN users"]

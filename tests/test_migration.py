@@ -60,7 +60,7 @@ def test_validate_migration_never_executes_scripts(tmp_path: Path):
     assert "valid" not in result
     assert result["up"]["statement_types"] == ["ALTER", "DROP"]
     assert result["down"]["statement_types"] == ["ALTER"]
-    assert result["execution_note"] == "Not executed. Review and run manually."
+    assert result["execution_note"].startswith("Not executed, and not syntax-checked")
     assert get_migration_context(engine)["tables"] == before
 
 
@@ -174,3 +174,19 @@ def test_a_migration_too_large_to_parse_is_refused_with_a_clear_code():
         )
 
     assert raised.value.code == "query_too_complex"
+
+
+@pytest.mark.parametrize("script", ["CREATE TABLE (((", "CREATE TABLE t (a INT))"])
+def test_validate_migration_rejects_unbalanced_parentheses(tmp_path: Path, script: str):
+    engine = create_engine(f"sqlite:///{tmp_path / 'sample.db'}")
+
+    with pytest.raises(ToolInputError, match="unbalanced parentheses"):
+        validate_migration(engine, script, "DROP TABLE t")
+
+
+def test_parentheses_inside_a_literal_are_not_counted(tmp_path: Path):
+    engine = create_engine(f"sqlite:///{tmp_path / 'sample.db'}")
+
+    result = validate_migration(engine, "INSERT INTO t VALUES ('(')", "DELETE FROM t")
+
+    assert result["up"]["statement_types"] == ["INSERT"]

@@ -57,11 +57,20 @@ class ToolInputError(ValueError):
 
 def table_not_found(table_name: str, known_tables: Sequence[str]) -> ToolInputError:
     """Report a missing table, with the nearest names the database does have."""
+    # Compared lowercased, so USERS still suggests users; reported as spelled.
+    matches = get_close_matches(
+        table_name.lower(), [name.lower() for name in known_tables], n=3, cutoff=0.6
+    )
     return ToolInputError(
         code="table_not_found",
         message=f"Table not found: {table_name}",
         hint="Call explore_schema() to list the tables in this database.",
-        did_you_mean=get_close_matches(table_name, list(known_tables), n=3, cutoff=0.6),
+        did_you_mean=[
+            name
+            for match in dict.fromkeys(matches)
+            for name in known_tables
+            if name.lower() == match
+        ][:3],
     )
 
 

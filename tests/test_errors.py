@@ -213,3 +213,16 @@ def test_classifying_without_logging_leaves_the_log_alone(caplog):
         assert from_database_error(refused, log=False).code == "database_unavailable"
 
     assert caplog.text == ""
+
+
+def test_table_not_found_suggests_a_name_that_differs_only_in_case():
+    error = table_not_found("USERS", ["users", "orders"])
+
+    assert error.details["did_you_mean"] == ["users"]
+
+
+def test_table_not_found_keeps_every_spelling_of_a_case_insensitive_match():
+    # Postgres allows both, as "Users" and users.
+    error = table_not_found("USERS", ["Users", "users", "orders"])
+
+    assert error.details["did_you_mean"] == ["Users", "users"]
