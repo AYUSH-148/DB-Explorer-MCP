@@ -139,7 +139,7 @@ The cap is never silent. The wrapper actually asks for `row_limit + 1` rows; if 
 
 Validation is only the first of three layers, because a keyword blocklist cannot see a query that is syntactically fine and still harmful:
 
-- **A statement timeout.** `SELECT pg_sleep(600)` passes every check above, so time is bounded independently of syntax: `statement_timeout` on PostgreSQL, `max_execution_time` on MySQL, and a progress-handler deadline on SQLite. Configured by `QUERY_TIMEOUT_SECONDS`, applied in [db.py](db.py).
+- **A statement timeout.** `SELECT pg_sleep(600)` passes every check above, so time is bounded independently of syntax: `statement_timeout` on PostgreSQL (set with `SET LOCAL` in each transaction rather than at connect, so it works behind PgBouncer and the Supabase and Neon poolers, which refuse an `options` startup parameter), `max_execution_time` on MySQL, and a progress-handler deadline on SQLite. Configured by `QUERY_TIMEOUT_SECONDS`, applied in [db.py](db.py).
 - **A read-only transaction.** Reads run through `BEGIN READ ONLY` on PostgreSQL, `START TRANSACTION READ ONLY` on MySQL, and `PRAGMA query_only` on SQLite. The database refuses the write itself, which is a guarantee the blocklist cannot make.
 - **Privileges.** Still the outermost boundary — see [.env.example](.env.example). A `SELECT`-only user is what stops server-side file reads like `pg_read_file()` that no keyword check reliably catches.
 
@@ -198,7 +198,7 @@ Requires Python 3.11+ and [uv](https://docs.astral.sh/uv/).
 ```powershell
 uv sync
 uv run python tests/seed_test_db.py   # creates sample.db
-uv run pytest                         # 302 tests on SQLite; 20 more with TEST_*_URL set
+uv run pytest                         # 303 tests on SQLite; 22 more with TEST_*_URL set
 uv run server.py                      # stdio transport
 ```
 
@@ -347,7 +347,7 @@ For real user identity rather than one shared secret, swap `SharedSecretVerifier
 uv run pytest
 ```
 
-302 tests covering the safety layer, value serialization, read-only enforcement and timeouts, HTTP authentication, inspector, explain, index suggestions, schema health, migration validation, error reporting, and the tool wrappers. Each uses a temporary SQLite database, so the suite needs no credentials and no running server.
+303 tests covering the safety layer, value serialization, read-only enforcement and timeouts, HTTP authentication, inspector, explain, index suggestions, schema health, migration validation, error reporting, and the tool wrappers. Each uses a temporary SQLite database, so the suite needs no credentials and no running server.
 
 SQLite cannot produce the types that break a real driver -- it has no `NUMERIC` and returns `str`/`int` for nearly everything -- so [tests/test_serialization.py](tests/test_serialization.py) exercises `Decimal`, `datetime`, `UUID`, and binary values directly rather than through a query. [tests/test_live_databases.py](tests/test_live_databases.py) covers what SQLite cannot: the read-only transaction, the server-side statement timeout, `NUMERIC`/`TIMESTAMP` values, and catalog reflection, against real PostgreSQL and MySQL. Set `TEST_POSTGRES_URL` and/or `TEST_MYSQL_URL` (a throwaway database: the tests create and drop `dbx_live_*` tables) to run it; unset, it is skipped. CI runs both against service containers.
 
@@ -384,5 +384,6 @@ tests/            pytest suite over temporary SQLite databases
 - **SQL is capped at 50,000 characters before parsing.** `sqlparse` spends about 0.9 s of CPU on 50 KB of dense SQL such as a long `IN (...)` list and about 2.7 s on 100 KB, and refuses more than 10,000 tokens in one list long before either, so the cap costs nothing a query could have used. Past either limit the call fails with `query_too_complex` rather than `internal_error`.
 - **The row cap is a context guard, not a performance guard.** A heavy aggregate still runs in full on the database before its output is limited. `QUERY_TIMEOUT_SECONDS` is what bounds the cost of that work.
 - **Long text is cut, and so is a large result.** `row_limit` bounds rows, not bytes, so one 5 MB text cell used to arrive whole. A text value over 2000 characters arrives as its first 2000 followed by `... [truncated: N characters in total]`, in `execute_query`, `explain_query` and `explore_schema` sample rows alike. `execute_query` also stops adding rows once the result passes 500,000 bytes, sets `truncated`, and says in `note` that a higher `row_limit` will not help. The first row is always kept.
+- **MariaDB is not tested.** It shares the MySQL code path, but CI runs only PostgreSQL and MySQL. MariaDB's documentation says it may drop an `ORDER BY` inside a subquery that has no `LIMIT`, and every query here is wrapped in one, so on MariaDB a truncated, ordered result may not be the true top N. Add your own `LIMIT` to an ordered query there.
 - **Binary columns are summarised, not returned.** Values up to 256 bytes arrive hex-encoded, which suits `BINARY(16)` UUIDs and digests; anything larger is reported as a size only. Inlining a multi-megabyte blob would consume the context window it was sent to.
 - **Wide `NUMERIC` values arrive as strings.** A decimal that fits a float is a JSON number so it sorts and compares correctly; one that does not keeps its exact digits rather than being silently rounded.

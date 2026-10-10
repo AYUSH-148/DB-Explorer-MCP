@@ -1,5 +1,6 @@
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from sqlalchemy import text
@@ -7,6 +8,7 @@ from sqlalchemy.exc import DBAPIError, OperationalError
 from sqlalchemy.exc import TimeoutError as PoolTimeoutError
 
 from db import (
+    _begin_read_only,
     create_configured_engine,
     engine_timeout_seconds,
     read_only_connection,
@@ -90,11 +92,22 @@ def test_a_call_cannot_start_a_statement_after_its_budget_is_spent(
             connection.execute(text("SELECT 1"))
 
 
-def test_postgres_gets_a_server_side_statement_timeout():
-    assert timeout_connect_args("postgresql", 7) == {
-        "connect_timeout": 7,
-        "options": "-c statement_timeout=7000"
-    }
+def test_postgres_sends_no_startup_options_a_pooler_would_refuse():
+    # PgBouncer, Supabase and Neon poolers reject an options startup parameter.
+    assert timeout_connect_args("postgresql", 7) == {"connect_timeout": 7}
+
+
+def test_postgres_sets_its_statement_timeout_inside_the_transaction():
+    statements = []
+    connection = SimpleNamespace(
+        engine=SimpleNamespace(dialect=SimpleNamespace(name="postgresql")),
+        execution_options=lambda **_options: None,
+        exec_driver_sql=statements.append,
+    )
+
+    _begin_read_only(connection, 7)
+
+    assert statements == ["SET LOCAL statement_timeout = 7000"]
 
 
 def test_mysql_gets_driver_level_timeouts():

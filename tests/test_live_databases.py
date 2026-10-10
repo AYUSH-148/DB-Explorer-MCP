@@ -148,6 +148,20 @@ def test_a_slow_statement_is_cancelled_by_the_server(url):
     assert time.monotonic() - started < 8
 
 
+def test_the_postgres_timeout_lasts_one_transaction(engine):
+    # Set with SET LOCAL rather than an options startup parameter, which PgBouncer
+    # and the Supabase and Neon poolers refuse.
+    if engine.dialect.name != "postgresql":
+        pytest.skip("statement_timeout is PostgreSQL's")
+
+    with read_only_connection(engine, timeout_seconds=3) as connection:
+        assert connection.execute(text("SHOW statement_timeout")).scalar() == "3s"
+
+    # The pool hands back the same connection; the limit must not have stayed on it.
+    with engine.connect() as connection:
+        assert connection.execute(text("SHOW statement_timeout")).scalar() != "3s"
+
+
 def test_driver_values_are_serialized_and_the_row_cap_holds(engine):
     result = execute_safe(
         engine,
