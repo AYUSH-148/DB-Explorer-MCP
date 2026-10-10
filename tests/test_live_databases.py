@@ -47,6 +47,21 @@ SCHEMA = [
     "INSERT INTO dbx_live_orders VALUES (1, 1)",
 ]
 
+# Enough rows, with statistics, that PostgreSQL's planner uses the primary key for
+# an equality lookup instead of scanning, as it rightly does on a two-row table.
+# MySQL reads a primary-key equality as access type const at any size.
+EXTRA_SETUP = {
+    "postgresql": [
+        "INSERT INTO dbx_live_users"
+        " SELECT g, 'User' || g, 0, TIMESTAMP '2026-01-01' FROM generate_series(3, 2000) g",
+        "ANALYZE dbx_live_users",
+    ],
+}
+
+# The server's own "statement cancelled" error, as opposed to a client-side read
+# timeout, which raises the same exception class.
+TIMEOUT_ERROR_CODE = {"postgresql": "57014", "mysql": 3024}
+
 # Runs far past a one-second budget unless the server cancels it. MySQL's SLEEP()
 # returns early without an error when interrupted, so it gets real work instead.
 SLOW_QUERY = {
@@ -59,10 +74,22 @@ SLOW_QUERY = {
 }
 
 
-def _drop_tables(url: str) -> None:
-    with create_engine(url).begin() as connection:
-        connection.execute(text("DROP TABLE IF EXISTS dbx_live_orders"))
-        connection.execute(text("DROP TABLE IF EXISTS dbx_live_users"))
+DROP_TABLES = [
+    "DROP TABLE IF EXISTS dbx_live_orders",
+    "DROP TABLE IF EXISTS dbx_live_users",
+]
+
+
+def _run(url: str, statements: list[str]) -> None:
+    # Disposed straight away: an engine left to the garbage collector holds its
+    # pooled connection open, and small hosted plans cap connections.
+    engine = create_engine(url)
+    try:
+        with engine.begin() as connection:
+            for statement in statements:
+                connection.execute(text(statement))
+    finally:
+        engine.dispose()
 
 
 @pytest.fixture(scope="module", params=list(BACKENDS))
@@ -71,12 +98,9 @@ def url(request):
     if not url:
         pytest.skip(f"{BACKENDS[request.param]} is not set")
 
-    _drop_tables(url)
-    with create_engine(url).begin() as connection:
-        for statement in SCHEMA:
-            connection.execute(text(statement))
+    _run(url, DROP_TABLES + SCHEMA + EXTRA_SETUP.get(request.param, []))
     yield url
-    _drop_tables(url)
+    _run(url, DROP_TABLES)
 
 
 @pytest.fixture
@@ -96,8 +120,10 @@ def test_writes_are_refused_by_the_database(engine):
 
 
 def test_read_only_mode_does_not_leak_to_the_next_checkout(engine):
-    with read_only_connection(engine):
-        pass
+    # A statement inside, as every tool runs, so the mode is undone with a
+    # transaction open.
+    with read_only_connection(engine) as connection:
+        connection.execute(text("SELECT 1"))
 
     # The pool hands back the same connection; it must be writable again.
     with engine.connect() as connection:
@@ -110,11 +136,14 @@ def test_a_slow_statement_is_cancelled_by_the_server(url):
     started = time.monotonic()
     try:
         with read_only_connection(engine) as connection:
-            with pytest.raises(DBAPIError):
+            with pytest.raises(DBAPIError) as caught:
                 connection.execute(text(SLOW_QUERY[engine.dialect.name]))
     finally:
         engine.dispose()
 
+    error = caught.value.orig
+    code = getattr(error, "pgcode", None) or error.args[0]
+    assert code == TIMEOUT_ERROR_CODE[engine.dialect.name]
     # The query alone would run 10s or more; the server stopped it at 1s.
     assert time.monotonic() - started < 8
 

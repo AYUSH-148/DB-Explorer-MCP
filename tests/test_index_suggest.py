@@ -139,3 +139,23 @@ def test_suggest_indexes_requires_one_input(engine):
 
     with pytest.raises(ValueError, match="not both"):
         suggest_indexes(engine, query="SELECT 1", table_name="users")
+
+
+@pytest.mark.parametrize(
+    "dialect, plan_row, flagged",
+    [
+        ("postgresql", {"QUERY PLAN": "Seq Scan on users  (cost=0.00..1.02)"}, True),
+        ("postgresql", {"QUERY PLAN": "  ->  Parallel Seq Scan on users"}, True),
+        ("postgresql", {"QUERY PLAN": "Index Scan using users_pkey on users"}, False),
+        # A string literal in the query, not a plan node.
+        ("postgresql", {"QUERY PLAN": "  Filter: (name <> 'Seq Scan on x'::text)"}, False),
+        ("mysql", {"table": "users", "type": "ALL"}, True),
+        ("mysql", {"table": "users", "type": "const"}, False),
+        # The server's temporary tables: no index can serve them.
+        ("mysql", {"table": "<derived2>", "type": "ALL"}, False),
+        ("mysql", {"table": "<union1,2>", "type": "ALL"}, False),
+        ("mariadb", {"table": "users", "type": "ALL"}, True),
+    ],
+)
+def test_full_scan_reads_each_dialects_plan(dialect, plan_row, flagged):
+    assert (index_suggest._full_scan(dialect, plan_row) is not None) is flagged
