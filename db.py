@@ -109,11 +109,9 @@ def timeout_connect_args(backend: str, timeout_seconds: int) -> dict[str, Any]:
     # connect_timeout bounds a host that drops packets instead of refusing them;
     # without it every connect, and every pool_pre_ping, waits on the OS TCP timeout.
     if backend == "postgresql":
-        # Enforced by the server: Postgres cancels any statement that exceeds it.
-        return {
-            "connect_timeout": timeout_seconds,
-            "options": f"-c statement_timeout={timeout_seconds * 1000}",
-        }
+        # statement_timeout is set per transaction in _begin_read_only, not here:
+        # PgBouncer and the poolers built on it refuse an options startup parameter.
+        return {"connect_timeout": timeout_seconds}
     if backend in MYSQL_BACKENDS:
         # The server-side max_execution_time set in _install_mysql_timeout is what
         # cancels a slow query. A socket timeout only abandons it, leaving the
@@ -168,12 +166,19 @@ def create_configured_engine(
     return engine
 
 
-def _begin_read_only(connection: Connection) -> None:
+def _begin_read_only(connection: Connection, timeout_seconds: int) -> None:
     """Put the connection into a mode the database enforces, where one exists."""
     backend = connection.engine.dialect.name
     if backend == "postgresql":
         # Emits BEGIN READ ONLY. Must be set before the transaction starts.
         connection.execution_options(postgresql_readonly=True)
+        # Enforced by the server: Postgres cancels any statement that exceeds it.
+        # SET LOCAL ends with this transaction, so under a transaction-pooling
+        # PgBouncer it never reaches another client's server connection, which
+        # a session-level SET would.
+        connection.exec_driver_sql(
+            f"SET LOCAL statement_timeout = {timeout_seconds * 1000}"
+        )
     elif backend == "sqlite":
         connection.execute(text("PRAGMA query_only = ON"))
     elif backend in MYSQL_BACKENDS:
@@ -218,7 +223,7 @@ def read_only_connection(
     with engine.connect() as connection:
         try:
             # Inside the try, so a mode set before a later failure is still reset.
-            _begin_read_only(connection)
+            _begin_read_only(connection, timeout_seconds)
             _deadline.value = time.monotonic() + timeout_seconds
             yield connection
         finally:
