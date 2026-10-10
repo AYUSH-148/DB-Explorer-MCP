@@ -1,19 +1,27 @@
+import json
 import re
 from collections.abc import Iterable
 from typing import Any
 
-from sqlalchemy import Engine, text
+from sqlalchemy import Engine
 from sqlparse import parse
+from sqlparse.exceptions import SQLParseError
 from sqlparse.sql import Statement, Token
 from sqlparse.tokens import Comment, DDL, DML, Keyword, Literal
-from db import read_only_connection
-from errors import ToolInputError, unsafe_query
+from db import execute_raw, read_only_connection
+from errors import ToolInputError, query_too_complex, unsafe_query
 from serialization import jsonable_rows
 
 
 # The row cap is a context guard, so the caller must not be able to raise it
 # without bound. Mirrors MAX_TABLE_LIMIT in inspector.py.
 MAX_ROW_LIMIT = 1000
+# row_limit bounds rows, not bytes: 1000 rows of wide text still run to megabytes.
+MAX_RESULT_BYTES = 500_000
+# Parsing costs about 0.9s of CPU at this length for dense SQL such as a long
+# IN (...) list, and about 2.7s at twice it. sqlparse refuses more than 10,000
+# tokens in one list long before then, so a longer query could not pass anyway.
+MAX_SQL_CHARS = 50_000
 
 BLOCKED_KEYWORDS = {
     "ALTER",
@@ -123,16 +131,34 @@ def has_comment(statement: Statement, markers: tuple[str, ...] = _COMMENT_MARKER
     return _has_comment(statement.flatten(), markers)
 
 
+def parse_sql(sql: str) -> list[Statement]:
+    """Parse SQL, refusing input too long or too nested for sqlparse to handle.
+
+    sqlparse raises past 10,000 tokens in one list (an IN list of about 3,000
+    values) or 100 levels of nesting. Uncaught, that reached the caller as
+    internal_error, which tells it nothing it can fix.
+    """
+    if len(sql) > MAX_SQL_CHARS:
+        raise query_too_complex(
+            f"it is {len(sql)} characters; the limit is {MAX_SQL_CHARS}"
+        )
+    try:
+        return list(parse(sql))
+    except SQLParseError as error:
+        raise query_too_complex(str(error).rstrip(".")) from error
+
+
 def validate_query(sql: str, dialect: str | None = None) -> tuple[bool, str]:
     """Return whether SQL contains exactly one safe read-only statement.
 
     `dialect` is the SQLAlchemy dialect name. It only decides whether a "#" is
-    read as a comment; None means the strictest reading.
+    read as a comment; None means the strictest reading. Raises query_too_complex
+    for SQL the parser cannot check.
     """
     if not isinstance(sql, str) or not sql.strip():
         return False, "SQL query is required"
 
-    statements = [statement for statement in parse(sql) if statement.tokens]
+    statements = [statement for statement in parse_sql(sql) if statement.tokens]
     if len(statements) != 1:
         return False, "Exactly one SQL statement is required"
 
@@ -244,12 +270,26 @@ def execute_safe(
     )
 
     with read_only_connection(engine) as connection:
-        result = connection.execute(text(query))
+        result = execute_raw(connection, query)
         columns = _labels(list(result.keys()))
         rows = jsonable_rows(dict(zip(columns, row)) for row in result.fetchall())
 
     truncated = len(rows) > row_limit
     rows = rows[:row_limit]
+    notes = []
+    size = 0
+    for index, row in enumerate(rows):
+        size += len(json.dumps(row))
+        # The first row is always kept, so an oversized result still shows its shape.
+        if index and size > MAX_RESULT_BYTES:
+            rows = rows[:index]
+            truncated = True
+            notes.append(
+                f"The result was cut to {index} rows to stay under "
+                f"{MAX_RESULT_BYTES} bytes; a higher row_limit will not return "
+                "more. Select fewer or narrower columns, or filter with WHERE."
+            )
+            break
     response = {
         "columns": columns,
         "rows": rows,
@@ -261,9 +301,11 @@ def execute_safe(
     repeated = _repeated_names(columns)
     if repeated:
         response["duplicate_columns"] = repeated
-        response["note"] = (
+        notes.append(
             f"Column names repeat: {', '.join(repeated)}. The later ones are "
             "labelled name:1, name:2 and so on; those labels are not valid "
             "SQL. Alias the columns in your query, e.g. u.id AS user_id."
         )
+    if notes:
+        response["note"] = " ".join(notes)
     return response

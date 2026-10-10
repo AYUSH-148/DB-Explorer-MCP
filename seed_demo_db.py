@@ -190,7 +190,7 @@ def create_demo_database(database_path: Path) -> dict[str, int]:
 
 
 if __name__ == "__main__":
-    counts = create_demo_database(Path("sample.db"))
+    counts = create_demo_database(Path(__file__).resolve().parent / "sample.db")
     print("sample.db seeded:")
     for table, count in counts.items():
         print(f"  {table:14} {count:4} rows")

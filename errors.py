@@ -95,6 +95,19 @@ _UNSAFE_HINTS = {
 }
 
 
+def query_too_complex(detail: str) -> ToolInputError:
+    """Report SQL too long or too deeply nested for the parser to check."""
+    return ToolInputError(
+        code="query_too_complex",
+        message=f"The SQL is too large to check safely: {detail}",
+        hint=(
+            "Send shorter, flatter SQL: replace a long IN (...) or VALUES list "
+            "with a JOIN or a subquery, split it across several calls, or nest "
+            "fewer parentheses."
+        ),
+    )
+
+
 def unsafe_query(reason: str) -> ToolInputError:
     """Report a blocked query, naming the fix for the rule that rejected it."""
     return ToolInputError(

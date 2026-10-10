@@ -1,12 +1,11 @@
 from typing import Any
 
 from sqlalchemy import Engine
-from sqlparse import parse
 from sqlparse.tokens import Keyword, Punctuation
 
 from errors import ToolInputError
 from inspector import DEFAULT_TABLE_LIMIT, get_schema_page
-from safety import comment_markers, has_comment
+from safety import comment_markers, has_comment, parse_sql
 
 
 def get_migration_context(
@@ -39,7 +38,7 @@ def _validate_script(script: str, name: str, dialect: str) -> list[str]:
     # A stray ";" parses as its own statement of nothing but punctuation.
     statements = [
         statement
-        for statement in parse(script)
+        for statement in parse_sql(script)
         if any(
             token.ttype not in Punctuation and not token.is_whitespace
             for token in statement.flatten()

@@ -11,6 +11,17 @@ from typing import Any
 from uuid import UUID
 
 MAX_INLINE_BINARY_BYTES = 256
+# row_limit bounds how many rows come back, not how large one is: a single 5 MB
+# text cell would otherwise arrive whole. 2000 characters keeps names, emails and
+# descriptions intact and cuts documents, logs and base64 payloads.
+MAX_INLINE_TEXT_CHARS = 2000
+
+
+def _text(value: str) -> str:
+    if len(value) <= MAX_INLINE_TEXT_CHARS:
+        return value
+    # Still a string, so the column keeps its type; the marker says it is partial.
+    return f"{value[:MAX_INLINE_TEXT_CHARS]}... [truncated: {len(value)} characters in total]"
 
 
 def _binary(value: bytes) -> dict[str, Any]:
@@ -35,8 +46,10 @@ def _number(value: Decimal) -> float | str:
 
 def jsonable(value: Any) -> Any:
     """Return `value` converted into something a JSON serializer can carry."""
-    if value is None or isinstance(value, (bool, int, str)):
+    if value is None or isinstance(value, (bool, int)):
         return value
+    if isinstance(value, str):
+        return _text(value)
     if isinstance(value, float):
         return value if math.isfinite(value) else str(value)
     if isinstance(value, Decimal):
@@ -55,8 +68,8 @@ def jsonable(value: Any) -> Any:
         return [jsonable(item) for item in value]
     if isinstance(value, dict):
         return {str(key): jsonable(item) for key, item in value.items()}
- 
-    return str(value)
+
+    return _text(str(value))
 
 
 def jsonable_rows(rows: Any) -> list[dict[str, Any]]:

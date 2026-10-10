@@ -5,6 +5,10 @@ from dotenv import load_dotenv
 load_dotenv(Path(__file__).resolve().parent / ".env")
 load_dotenv()
 
+# Next to this file, not in the working directory: an MCP client picks that, and
+# SQLite silently creates an empty database at a path that does not exist yet.
+SAMPLE_DATABASE = Path(__file__).resolve().parent / "sample.db"
+
 
 def _resolve_database_url() -> str:
     """Return the configured database URL, allowing sqlite only for local stdio."""
@@ -12,7 +16,9 @@ def _resolve_database_url() -> str:
     if url:
         return url
     if os.getenv("MCP_TRANSPORT", "stdio") == "stdio":
-        return "sqlite:///sample.db"
+        # mode=ro: the OS refuses writes, and a missing file is an error rather
+        # than a new empty database.
+        return f"sqlite:///file:{SAMPLE_DATABASE.as_posix()}?mode=ro&uri=true"
     raise RuntimeError("DATABASE_URL must be set when serving over HTTP")
 
 

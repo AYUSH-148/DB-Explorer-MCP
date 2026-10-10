@@ -14,7 +14,7 @@ from contextlib import contextmanager
 from typing import Any
 
 from sqlalchemy import Connection, Engine, create_engine, event, text
-from sqlalchemy.engine import make_url
+from sqlalchemy.engine import CursorResult, make_url
 from sqlalchemy.pool import QueuePool
 
 from config import (
@@ -194,6 +194,17 @@ def _end_read_only(connection: Connection) -> None:
         # An aborted statement can leave the connection unusable; the pool will
         # discard it. Failing to reset a pragma must not mask the real error.
         pass
+
+
+def execute_raw(connection: Connection, sql: str) -> CursorResult[Any]:
+    """Run SQL exactly as written, with no bind parameters.
+
+    text() reads :name as a placeholder even inside a string literal, so a query
+    such as WHERE meta = '{"paid":true}' failed before reaching the database,
+    asking for a value for "true". no_parameters also hands the driver the string
+    untouched, so % and ::int casts need no escaping.
+    """
+    return connection.exec_driver_sql(sql, execution_options={"no_parameters": True})
 
 
 @contextmanager

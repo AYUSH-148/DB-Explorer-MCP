@@ -1,9 +1,11 @@
 import inspect
 import logging
+import os
 from collections.abc import Callable
 from functools import wraps
 from typing import Any, ParamSpec, TypeVar
 
+import fastmcp
 from fastmcp import FastMCP
 from fastmcp.exceptions import ToolError
 from sqlalchemy.exc import SQLAlchemyError
@@ -26,6 +28,13 @@ from migration import get_migration_context, validate_migration as validate_migr
 from safety import execute_safe
 from schema_health import validate_schema as validate_schema_data
 
+
+# FastMCP leaves Host and Origin checking off by default, so a web page the user
+# visits could reach a server on localhost through DNS rebinding. "auto" checks
+# loopback binds only, so a public deployment on its own domain is unaffected. Set
+# here rather than in run_server(), which a hosted entrypoint never calls.
+if "FASTMCP_HTTP_HOST_ORIGIN_PROTECTION" not in os.environ:
+    fastmcp.settings.http_host_origin_protection = "auto"
 
 mcp = FastMCP(
     "db-explorer",

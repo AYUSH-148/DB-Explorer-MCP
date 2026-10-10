@@ -166,6 +166,15 @@ def test_explain_returns_a_plan(engine):
     assert explain_safe(engine, "SELECT name FROM dbx_live_users")["plan"]
 
 
+def test_colons_and_percents_in_a_literal_reach_the_database_untouched(engine):
+    # :name is SQLAlchemy's placeholder; %s is psycopg2's and pymysql's.
+    literal = '50% off :tag {"paid":true}'
+    sql = f"SELECT '{literal}' AS value FROM dbx_live_users WHERE id = 1"
+
+    assert execute_safe(engine, sql)["rows"] == [{"value": literal}]
+    assert explain_safe(engine, sql)["plan"]
+
+
 def test_table_detail_reflects_keys(engine):
     details = get_table_detail(engine, "dbx_live_orders")
 

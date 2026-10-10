@@ -3,6 +3,11 @@
 stdio needs none: the client owns the process and there is no network surface. Any
 HTTP transport publishes SELECT on the configured database to whoever holds the
 URL, so it fails closed instead.
+
+FastMCP applies the provider only to its HTTP app, so stdio ignores whatever is
+returned here. That is why one is returned even when MCP_TRANSPORT is stdio: a host
+that loads server.py:mcp and serves it over HTTP (Horizon, `fastmcp run
+--transport http`) never sets MCP_TRANSPORT, and would otherwise serve with none.
 """
 
 from __future__ import annotations
@@ -33,15 +38,19 @@ class SharedSecretVerifier(TokenVerifier):
         return AccessToken(token=token, client_id="db-explorer", scopes=[])
 
 
+class RejectEveryToken(TokenVerifier):
+    """Refuse every HTTP request: no token was configured to check against."""
+
+    async def verify_token(self, token: str) -> AccessToken | None:
+        return None
+
+
 def build_auth_provider(
     transport: str,
     token: str,
     allow_unauthenticated: bool,
 ) -> AuthProvider | None:
     """Return the auth provider for a transport, refusing to expose HTTP unguarded."""
-    if transport == "stdio":
-        return None
-
     if token:
         if len(token) < MINIMUM_TOKEN_LENGTH:
             raise RuntimeError(
@@ -51,12 +60,19 @@ def build_auth_provider(
         return SharedSecretVerifier(token)
 
     if allow_unauthenticated:
+        if transport == "stdio":
+            return None
         print(
             f"WARNING: serving {transport} with no authentication. Every client that "
             "can reach this port has SELECT on the configured database.",
             file=sys.stderr,
         )
         return None
+
+    if transport == "stdio":
+        # Local stdio runs as before. An HTTP host that imported server.py:mcp
+        # answers 401 until MCP_AUTH_TOKEN or MCP_ALLOW_UNAUTHENTICATED is set.
+        return RejectEveryToken()
 
     raise RuntimeError(
         f"MCP_AUTH_TOKEN is required when MCP_TRANSPORT is {transport!r}, because an "

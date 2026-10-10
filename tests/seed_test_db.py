@@ -37,4 +37,4 @@ def create_sample_database(database_path: Path) -> None:
 
 
 if __name__ == "__main__":
-    create_sample_database(Path("sample.db"))
+    create_sample_database(Path(__file__).resolve().parent.parent / "sample.db")

@@ -4,6 +4,8 @@ import pytest
 from sqlalchemy import create_engine, text
 from sqlalchemy.exc import SQLAlchemyError
 
+from errors import ToolInputError
+
 import safety
 from safety import (
     MAX_ROW_LIMIT,
@@ -408,3 +410,60 @@ def test_a_case_differing_repeat_is_reported(tmp_path: Path):
 
     assert result["duplicate_columns"] == ["ID"]
     assert result["rows"] == [{"id": 1, "ID:1": 2}]
+
+
+@pytest.mark.parametrize(
+    "literal",
+    ["Bo :tag", '{"paid":true}', '{"qty":5}', "%:smile:%", "50% off"],
+)
+def test_a_colon_or_percent_inside_a_literal_reaches_the_database(literal):
+    # text() read :tag as a bind parameter even inside quotes, and failed asking
+    # for a value the caller never meant to pass.
+    engine = create_engine("sqlite://")
+    quoted = literal.replace("'", "''")
+
+    result = execute_safe(engine, f"SELECT '{quoted}' AS value")
+
+    assert result["rows"] == [{"value": literal}]
+
+
+def test_a_result_over_the_size_budget_is_cut_and_says_so(monkeypatch):
+    monkeypatch.setattr(safety, "MAX_RESULT_BYTES", 50)
+    engine = create_engine("sqlite://")
+    sql = "SELECT 'x' AS v UNION ALL " * 9 + "SELECT 'x'"
+
+    result = execute_safe(engine, sql, row_limit=10)
+
+    assert 0 < result["count"] < 10
+    assert result["truncated"] is True
+    assert "row_limit will not return more" in result["note"]
+
+
+def test_the_first_row_is_kept_even_when_it_alone_is_over_budget(monkeypatch):
+    monkeypatch.setattr(safety, "MAX_RESULT_BYTES", 1)
+    engine = create_engine("sqlite://")
+
+    result = execute_safe(engine, "SELECT 'x' AS v UNION ALL SELECT 'y'")
+
+    assert result["rows"] == [{"v": "x"}]
+    assert result["truncated"] is True
+
+
+@pytest.mark.parametrize(
+    "sql",
+    [
+        # Over sqlparse's 10,000-token limit for one list.
+        "SELECT 1 WHERE 1 IN (" + ", ".join(str(i) for i in range(5000)) + ")",
+        # Over its 100-level nesting limit.
+        "SELECT " + "(" * 101 + "1" + ")" * 101,
+        # Over the length cap, refused before parsing costs any CPU.
+        "SELECT '" + "x" * safety.MAX_SQL_CHARS + "'",
+    ],
+    ids=["long_in_list", "deep_nesting", "over_length_cap"],
+)
+def test_sql_the_parser_cannot_check_is_refused_with_a_clear_code(sql):
+    # sqlparse's own error used to reach the caller as internal_error.
+    with pytest.raises(ToolInputError) as raised:
+        execute_safe(create_engine("sqlite://"), sql)
+
+    assert raised.value.code == "query_too_complex"

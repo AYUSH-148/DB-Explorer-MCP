@@ -19,11 +19,14 @@ FastMCP Cloud is now presented as Prefect Horizon in the current FastMCP documen
    server.py:mcp
    ```
 
-4. Add this secret environment variable:
+4. Add these environment variables:
 
    ```text
    DATABASE_URL=<remote database connection string>
+   MCP_ALLOW_UNAUTHENTICATED=true
    ```
+
+   `MCP_ALLOW_UNAUTHENTICATED=true` hands authentication to the platform (step 5). Without it, or an `MCP_AUTH_TOKEN`, the server answers `401` to every request rather than serving the database unprotected. Set it only together with step 5.
 
 5. Enable authentication.
 6. Deploy the server.
