@@ -28,7 +28,7 @@ Giving an assistant raw database credentials means one confused or prompt-inject
                             │  MCP  ·  stdio (local)
                             │        ·  streamable HTTP + OAuth 2.0 (remote)
 ┌───────────────────────────▼──────────────────────────────────┐
-│ server.py  —  FastMCP instance + one shared SQLAlchemy engine│
+│ server.py  —  FastMCP instance + one engine per token group  │
 │                                                              │
 │   explore_schema   execute_query    explain_query            │
 │   validate_schema  suggest_index    migration_context        │
@@ -143,7 +143,7 @@ Validation is only the first of three layers, because a keyword blocklist cannot
 - **A read-only transaction.** Reads run through `BEGIN READ ONLY` on PostgreSQL, `START TRANSACTION READ ONLY` on MySQL, and `PRAGMA query_only` on SQLite. The database refuses the write itself, which is a guarantee the blocklist cannot make.
 - **Privileges.** Still the outermost boundary — see [.env.example](.env.example). A `SELECT`-only user is what stops server-side file reads like `pg_read_file()` that no keyword check reliably catches.
 
-  Privileges are also where to restrict *what* can be read. The token is all-or-nothing, so anything the database user can `SELECT`, every token holder can read. Hide credentials and PII with grants, not with a server-side table or column blocklist: a parser cannot see the columns behind `SELECT *`, `SELECT u FROM users u`, or `row_to_json(u)`, but the database enforces a grant on all of them.
+  Privileges are also where to restrict *what* can be read. A token reads whatever its group's database user can `SELECT`, so give each group its own user (see [Named tokens and groups](#named-tokens-and-groups)). Hide credentials and PII with grants, not with a server-side table or column blocklist: a parser cannot see the columns behind `SELECT *`, `SELECT u FROM users u`, or `row_to_json(u)`, but the database enforces a grant on all of them.
 
   ```sql
   -- PostgreSQL: whole tables, minus one
@@ -155,7 +155,7 @@ Validation is only the first of three layers, because a keyword blocklist cannot
 
   MySQL takes the same column list: `GRANT SELECT (id, name) ON app.users TO 'explorer'@'%';`. A query that touches a revoked column then fails with `sql_error` (`permission denied`). On PostgreSQL, `explore_schema` still lists tables the user cannot read, because reflection reads the catalog, not the data.
 
-Every tool call is logged on the `db_explorer.audit` logger, one line each, to stderr: the tool name, how it ended (`ok`, with `rows` and `truncated` for `execute_query`, or the error code such as `unsafe_query`, `sql_error` or `query_timeout`), and its arguments, capped at 2000 characters. Refused, denied and timed-out calls are logged too. The logger is set up when `server.py` is imported, so a hosted entrypoint (`server.py:mcp`) logs the same as `uv run server.py`. Arguments are logged verbatim, so literals in a `WHERE` clause land in the log; treat the log as being as sensitive as the data. With one shared token the log records what was asked and when, not who asked.
+Every tool call is logged on the `db_explorer.audit` logger, one line each, to stderr: the tool name, how it ended (`ok`, with `rows` and `truncated` for `execute_query`, or the error code such as `unsafe_query`, `sql_error` or `query_timeout`), and its arguments, capped at 2000 characters. Refused, denied and timed-out calls are logged too. The logger is set up when `server.py` is imported, so a hosted entrypoint (`server.py:mcp`) logs the same as `uv run server.py`. Arguments are logged verbatim, so literals in a `WHERE` clause land in the log; treat the log as being as sensitive as the data. A call made over HTTP with a token also records who made it, as `user=<token name> group=<group or ->`, between the outcome and the arguments.
 
 `validate_migration` is deliberately the inverse: it rejects `SELECT` statements, and it never runs either script. You get the parsed statement types back and run the DDL yourself.
 
@@ -198,7 +198,7 @@ Requires Python 3.11+ and [uv](https://docs.astral.sh/uv/).
 ```powershell
 uv sync
 uv run python tests/seed_test_db.py   # creates sample.db
-uv run pytest                         # 303 tests on SQLite; 22 more with TEST_*_URL set
+uv run pytest                         # 322 tests on SQLite; 22 more with TEST_*_URL set
 uv run server.py                      # stdio transport
 ```
 
@@ -231,6 +231,20 @@ claude mcp add --transport http db-explorer https://your-deployment.fastmcp.app/
 ```
 
 Run `/mcp` → **Authenticate** for the OAuth flow; tokens are cached and refreshed automatically.
+
+For a server you host yourself with a bearer token, send it as a header. Read it from an environment variable, so a `.mcp.json` committed for the team holds no secret:
+
+```json
+{
+  "mcpServers": {
+    "db-explorer": {
+      "type": "http",
+      "url": "https://dbx.example.com/mcp",
+      "headers": { "Authorization": "Bearer ${DBX_TOKEN}" }
+    }
+  }
+}
+```
 
 ### Claude Desktop
 
@@ -311,7 +325,9 @@ To watch the guardrails work, ask it to run `DELETE FROM users`. The call fails 
 | `DB_POOL_SIZE` | `5` | Connections kept open to the database |
 | `DB_MAX_OVERFLOW` | `10` | Extra connections opened under load, closed when returned |
 | `DB_POOL_TIMEOUT_SECONDS` | `5` | How long a call waits for a free connection before failing with `server_busy` |
-| `MCP_AUTH_TOKEN` | — | **Required** when serving over HTTP, including a host that loads `server.py:mcp` itself. Minimum 32 characters |
+| `MCP_AUTH_TOKEN` | — | One shared token. This or `MCP_AUTH_TOKENS` is **required** when serving over HTTP, including a host that loads `server.py:mcp` itself. Minimum 32 characters |
+| `MCP_AUTH_TOKENS` | — | Named tokens, `name:token` or `name:group:token`, comma-separated. Use instead of `MCP_AUTH_TOKEN`, not with it. See [Named tokens and groups](#named-tokens-and-groups) |
+| `DATABASE_URL_<GROUP>` | — | The database URL for one token group, for example `DATABASE_URL_ANALYST`. **Required** for every group `MCP_AUTH_TOKENS` names |
 | `MCP_ALLOW_UNAUTHENTICATED` | `false` | Explicit opt-out of the token requirement, for trusted networks or a host whose own authentication sits in front (Horizon) |
 
 Tool calls run on up to 40 worker threads, but the pool allows at most `DB_POOL_SIZE + DB_MAX_OVERFLOW` (15 by default) at once. A call past that waits `DB_POOL_TIMEOUT_SECONDS`, then fails with `server_busy` so the client can retry. Raise the pool toward 40 for heavier HTTP traffic, but keep it under the database's connection limit (`max_connections`), counted across every server instance.
@@ -337,7 +353,26 @@ A host that loads `server.py:mcp` directly (Horizon, `fastmcp run server.py:mcp 
 
 Host and Origin headers are checked on a server bound to a loopback address, so a web page you visit cannot reach a local server through DNS rebinding (`421` for a foreign `Host`, `403` for a foreign `Origin`). FastMCP ships this check off; [server.py](server.py) turns it on unless `FASTMCP_HTTP_HOST_ORIGIN_PROTECTION` is set.
 
-For real user identity rather than one shared secret, swap `SharedSecretVerifier` for one of FastMCP's OAuth providers. See [DEPLOYMENT.md](DEPLOYMENT.md) for FastMCP Cloud / Prefect Horizon deployment, where OAuth 2.0 with dynamic client registration and PKCE is handled by the platform.
+### Named tokens and groups
+
+Give each person or service its own token, and optionally a group whose database user decides what it can read:
+
+```text
+MCP_AUTH_TOKENS=alice:analyst:<token>,carol:analyst:<token>,fran:finance:<token>,ci:<token>
+DATABASE_URL=postgresql+psycopg2://dbx_readonly:...@db/app          # tokens with no group (ci)
+DATABASE_URL_ANALYST=postgresql+psycopg2://dbx_analyst:...@db/app
+DATABASE_URL_FINANCE=postgresql+psycopg2://dbx_finance:...@db/app
+```
+
+Each entry is `name:token` or `name:group:token`. Names may use letters, digits, `_`, `.`, `@` and `-`; groups use lowercase letters, digits and `_`, because a group names its `DATABASE_URL_<GROUP>` variable. A matched token's name goes into every audit line. Its group picks the engine the call runs on, so the database's own grants, and on PostgreSQL its row-level security policies, decide what that caller can read. The server does not filter tables itself. A lone `MCP_AUTH_TOKEN` behaves as one token named `default` with no group.
+
+The server refuses to start on a malformed entry, a repeated name or token, a token under 32 characters, a group with no `DATABASE_URL_<GROUP>`, or both `MCP_AUTH_TOKEN` and `MCP_AUTH_TOKENS` set. Its errors name the entry by position, never by its contents, so a token cannot leak into a deploy log. Every token is compared in constant time against every entry, so response timing reveals neither a token nor which entry it matched. Tokens and groups are read at startup: restart the server after changing them.
+
+Each group has its own connection pool, so the server can hold up to `DB_POOL_SIZE + DB_MAX_OVERFLOW` connections per group plus the default. Lower both when there are many groups.
+
+On PostgreSQL, every user can read the system catalog, so `explore_schema` lists a table a group cannot `SELECT`. Its rows stay protected: asking for its detail or querying it fails with `permission denied`. To hide the name as well, move the table to a schema the group has no `USAGE` on. MySQL lists only tables the user has a privilege on. [DEPLOYMENT.md](DEPLOYMENT.md) has the `GRANT` statements for both, and a VM setup with HTTPS.
+
+For OAuth with an identity provider instead, pass one of FastMCP's providers as `auth=` in [server.py](server.py). The group lookup reads `claims["group"]` from the verified token, so a provider that sets that claim works with the group engines as they are. On Prefect Horizon, OAuth with dynamic client registration and PKCE is handled by the platform; see [DEPLOYMENT.md](DEPLOYMENT.md).
 
 **Hosted Supabase note:** direct connections (`db.<ref>.supabase.co`) are IPv6-only, which fails from IPv4-only containers with an empty-looking `psycopg2.OperationalError`. Use the pooler host from the dashboard's *Connect* panel, and note that the username becomes `postgres.<project-ref>`.
 
@@ -347,7 +382,7 @@ For real user identity rather than one shared secret, swap `SharedSecretVerifier
 uv run pytest
 ```
 
-303 tests covering the safety layer, value serialization, read-only enforcement and timeouts, HTTP authentication, inspector, explain, index suggestions, schema health, migration validation, error reporting, and the tool wrappers. Each uses a temporary SQLite database, so the suite needs no credentials and no running server.
+322 tests covering the safety layer, value serialization, read-only enforcement and timeouts, HTTP authentication and token groups, inspector, explain, index suggestions, schema health, migration validation, error reporting, and the tool wrappers. Each uses a temporary SQLite database, so the suite needs no credentials and no running server.
 
 SQLite cannot produce the types that break a real driver -- it has no `NUMERIC` and returns `str`/`int` for nearly everything -- so [tests/test_serialization.py](tests/test_serialization.py) exercises `Decimal`, `datetime`, `UUID`, and binary values directly rather than through a query. [tests/test_live_databases.py](tests/test_live_databases.py) covers what SQLite cannot: the read-only transaction, the server-side statement timeout, `NUMERIC`/`TIMESTAMP` values, and catalog reflection, against real PostgreSQL and MySQL. Set `TEST_POSTGRES_URL` and/or `TEST_MYSQL_URL` (a throwaway database: the tests create and drop `dbx_live_*` tables) to run it; unset, it is skipped. CI runs both against service containers.
 
