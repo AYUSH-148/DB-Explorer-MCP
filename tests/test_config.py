@@ -35,3 +35,16 @@ def test_the_default_database_is_read_only_at_the_file_level(default_url):
         assert connection.execute(text("SELECT COUNT(*) FROM users")).scalar() > 0
         with pytest.raises(OperationalError, match="readonly database"):
             connection.execute(text("DELETE FROM users"))
+
+
+def test_a_token_group_reads_its_own_database_url(monkeypatch):
+    monkeypatch.setenv("DATABASE_URL_ANALYST", "postgresql://dbx_analyst@db/app")
+
+    assert config.group_database_url("analyst") == "postgresql://dbx_analyst@db/app"
+
+
+def test_a_token_group_without_a_database_url_stops_startup(monkeypatch):
+    monkeypatch.delenv("DATABASE_URL_FINANCE", raising=False)
+
+    with pytest.raises(RuntimeError, match="DATABASE_URL_FINANCE must be set"):
+        config.group_database_url("finance")

@@ -4,6 +4,7 @@ from pathlib import Path
 import pytest
 from fastmcp import FastMCP
 from fastmcp.exceptions import ToolError
+from fastmcp.server.auth import AccessToken
 from starlette.testclient import TestClient
 from sqlalchemy import create_engine
 
@@ -220,3 +221,59 @@ def test_a_loopback_http_server_refuses_a_foreign_origin():
         )
 
     assert response.status_code == 403
+
+
+def _signed_in_as(monkeypatch, name, group):
+    token = AccessToken(token="t", client_id=name, scopes=[], claims={"group": group})
+    monkeypatch.setattr(server, "get_access_token", lambda: token)
+
+
+def test_a_token_group_runs_on_its_own_database_login(
+    configured_engine, tmp_path, monkeypatch, caplog
+):
+    # A second database stands in for the group's login: it has a table the
+    # default one lacks, so the result shows which engine ran the query.
+    group_engine = create_engine(f"sqlite:///{tmp_path / 'analyst.db'}")
+    with group_engine.begin() as connection:
+        connection.exec_driver_sql("CREATE TABLE analyst_only (id INTEGER)")
+    monkeypatch.setattr(server, "engine", configured_engine)
+    monkeypatch.setattr(server, "group_engines", {"analyst": group_engine})
+    _signed_in_as(monkeypatch, "alice", "analyst")
+
+    with caplog.at_level(logging.INFO, logger="db_explorer.audit"):
+        result = server.execute_query("SELECT COUNT(*) AS n FROM analyst_only")
+
+    assert result["rows"] == [{"n": 0}]
+    assert caplog.records[-1].getMessage().startswith(
+        "execute_query ok rows=1 truncated=False user=alice group=analyst {"
+    )
+
+
+def test_a_group_with_no_configured_login_is_refused(
+    configured_engine, monkeypatch, caplog
+):
+    # Only another auth provider can produce one, so it must fail closed rather
+    # than fall back to DATABASE_URL, which may see more than the group should.
+    monkeypatch.setattr(server, "engine", configured_engine)
+    monkeypatch.setattr(server, "group_engines", {"analyst": configured_engine})
+
+    for group in ("finance", ["analyst"]):
+        _signed_in_as(monkeypatch, "alice", group)
+        with caplog.at_level(logging.INFO, logger="db_explorer.audit"):
+            with pytest.raises(ToolError, match=r"\[unknown_group\]"):
+                server.execute_query("SELECT 1")
+        assert " unknown_group user=alice " in caplog.records[-1].getMessage()
+
+
+def test_a_token_without_a_group_uses_the_default_database(
+    configured_engine, monkeypatch, caplog
+):
+    monkeypatch.setattr(server, "engine", configured_engine)
+    monkeypatch.setattr(server, "group_engines", {})
+    _signed_in_as(monkeypatch, "ci", None)
+
+    with caplog.at_level(logging.INFO, logger="db_explorer.audit"):
+        result = server.execute_query("SELECT COUNT(*) AS n FROM users")
+
+    assert result["rows"][0]["n"] > 0
+    assert " user=ci group=- {" in caplog.records[-1].getMessage()

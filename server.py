@@ -1,9 +1,6 @@
-import base64
 import inspect
-import json
 import logging
 import os
-import re
 from collections.abc import Callable
 from functools import wraps
 from typing import Any, ParamSpec, TypeVar
@@ -11,17 +8,20 @@ from typing import Any, ParamSpec, TypeVar
 import fastmcp
 from fastmcp import FastMCP
 from fastmcp.exceptions import ToolError
-from fastmcp.server.dependencies import get_access_token, get_http_headers
+from fastmcp.server.dependencies import get_access_token
+from sqlalchemy import Engine
 from sqlalchemy.exc import SQLAlchemyError
 
-from auth import build_auth_provider
+from auth import build_auth_provider, token_entries
 from config import (
     DATABASE_URL,
     MCP_ALLOW_UNAUTHENTICATED,
     MCP_AUTH_TOKEN,
+    MCP_AUTH_TOKENS,
     MCP_HOST,
     MCP_PORT,
     MCP_TRANSPORT,
+    group_database_url,
 )
 from db import create_configured_engine, engine_timeout_seconds
 from errors import ToolInputError, from_database_error
@@ -40,13 +40,22 @@ from schema_health import validate_schema as validate_schema_data
 if "FASTMCP_HTTP_HOST_ORIGIN_PROTECTION" not in os.environ:
     fastmcp.settings.http_host_origin_protection = "auto"
 
+TOKEN_ENTRIES = token_entries(MCP_AUTH_TOKEN, MCP_AUTH_TOKENS)
 mcp = FastMCP(
     "db-explorer",
     auth=build_auth_provider(
-        MCP_TRANSPORT, MCP_AUTH_TOKEN, MCP_ALLOW_UNAUTHENTICATED
+        MCP_TRANSPORT, TOKEN_ENTRIES, MCP_ALLOW_UNAUTHENTICATED
     ),
 )
 engine = create_configured_engine(DATABASE_URL)
+# One engine per token group, each logging in as that group's database user, so
+# the database's own grants decide what a group's callers can read. Built at
+# import, so a group with no DATABASE_URL_<GROUP> stops the server from starting.
+# ponytail: one pool per group; lower DB_POOL_SIZE when there are many groups.
+group_engines = {
+    group: create_configured_engine(group_database_url(group))
+    for group in sorted({entry.group for entry in TOKEN_ENTRIES if entry.group})
+}
 logger = logging.getLogger(__name__)
 
 # One line per tool call: which tool, its arguments, and how it ended. Set up at
@@ -64,6 +73,39 @@ audit_log.addHandler(_audit_handler)
 # The arguments are caller-supplied, so a single call cannot grow the log by more
 # than this.
 AUDIT_ARGUMENT_LIMIT = 2000
+
+
+def current_engine() -> Engine:
+    """Return the engine for the caller's token group, or the default engine.
+
+    stdio and tokens without a group have no group, and use DATABASE_URL. A
+    group with no engine is refused rather than run on DATABASE_URL: it can only
+    come from an auth provider other than MCP_AUTH_TOKENS, and quietly giving it
+    the default login could grant more than that group was meant to see.
+    """
+    token = get_access_token()
+    group = token.claims.get("group") if token else None
+    if not group:
+        return engine
+    if isinstance(group, str) and group in group_engines:
+        return group_engines[group]
+    raise ToolInputError(
+        code="unknown_group",
+        message="No database login is configured for this caller's group",
+        hint=(
+            "The server builds a database login only for the groups named in "
+            "MCP_AUTH_TOKENS. Ask the operator to add the group there and set "
+            "its DATABASE_URL_<GROUP>."
+        ),
+    )
+
+
+def _caller() -> str:
+    token = get_access_token()
+    if token is None:
+        return ""
+    return f" user={token.client_id} group={token.claims.get('group') or '-'}"
+
 
 _Params = ParamSpec("_Params")
 _Result = TypeVar("_Result")
@@ -115,7 +157,9 @@ def tool_errors(
                     f"{arguments[:AUDIT_ARGUMENT_LIMIT]}... "
                     f"({len(arguments)} chars)"
                 )
-            audit_log.info("%s %s %s", function.__name__, outcome, arguments)
+            audit_log.info(
+                "%s %s%s %s", function.__name__, outcome, _caller(), arguments
+            )
 
     return wrapper
 
@@ -129,9 +173,9 @@ def explore_schema_data(
     offset: int = 0,
 ) -> dict[str, Any]:
     if table_name:
-        return get_table_detail(engine, table_name, include_sample_data)
+        return get_table_detail(current_engine(), table_name, include_sample_data)
     return get_schema_page(
-        engine,
+        current_engine(),
         name_pattern=name_pattern,
         limit=limit,
         offset=offset,
@@ -161,7 +205,7 @@ def explore_schema(
 
 
 def execute_query_data(sql: str, row_limit: int = 100) -> dict[str, Any]:
-    return execute_safe(engine, sql, row_limit)
+    return execute_safe(current_engine(), sql, row_limit)
 
 
 @mcp.tool
@@ -175,7 +219,7 @@ def execute_query(sql: str, row_limit: int = 100) -> dict[str, Any]:
 @tool_errors
 def explain_query(sql: str) -> dict[str, Any]:
     """Return the database execution plan for one safe SELECT query."""
-    return explain_safe(engine, sql)
+    return explain_safe(current_engine(), sql)
 
 
 @mcp.tool
@@ -187,7 +231,7 @@ def validate_schema(
     offset: int = 0,
 ) -> dict[str, Any]:
     """Check one table, or one page of tables, for schema issues."""
-    return validate_schema_data(engine, table_name, name_pattern, limit, offset)
+    return validate_schema_data(current_engine(), table_name, name_pattern, limit, offset)
 
 
 @mcp.tool
@@ -197,7 +241,7 @@ def suggest_index(
     table_name: str | None = None,
 ) -> dict[str, Any]:
     """Suggest indexes from a query plan or table foreign-key metadata."""
-    return suggest_indexes(engine, query, table_name)
+    return suggest_indexes(current_engine(), query, table_name)
 
 
 @mcp.tool
@@ -208,7 +252,7 @@ def migration_context(
     offset: int = 0,
 ) -> dict[str, Any]:
     """Return dialect and one page of table detail for client-side migration drafting."""
-    return get_migration_context(engine, name_pattern, limit, offset)
+    return get_migration_context(current_engine(), name_pattern, limit, offset)
 
 
 @mcp.tool
@@ -220,44 +264,7 @@ def validate_migration(up_sql: str, down_sql: str) -> dict[str, Any]:
     parentheses. It does not check syntax: the database reports other errors when
     the script is run.
     """
-    return validate_migration_data(engine, up_sql, down_sql)
-
-
-# TEMPORARY: remove once we know what identity Horizon forwards to the server.
-# It reports what reached the server for the caller's own request, and never a
-# value from a header whose name suggests a secret.
-_SECRET_HEADER = re.compile(r"auth|cookie|key|secret|token", re.IGNORECASE)
-
-
-def _unverified_claims(token: str) -> dict[str, Any] | None:
-    # Payload only, signature not checked: this is a diagnostic, not a decision.
-    parts = token.split(".")
-    if len(parts) != 3:
-        return None
-    try:
-        payload = parts[1] + "=" * (-len(parts[1]) % 4)
-        return json.loads(base64.urlsafe_b64decode(payload))
-    except ValueError:
-        return None
-
-
-@mcp.tool
-def whoami() -> dict[str, Any]:
-    """Temporary diagnostic: show which caller identity reached the server."""
-    headers = get_http_headers(include_all=True)
-    bearer = headers.get("authorization", "").removeprefix("Bearer ").strip()
-    token = get_access_token()
-    return {
-        "headers": {
-            name: "<redacted>" if _SECRET_HEADER.search(name) else value
-            for name, value in headers.items()
-        },
-        "bearer_present": bool(bearer),
-        "bearer_claims": _unverified_claims(bearer),
-        "access_token": None
-        if token is None
-        else {"client_id": token.client_id, "scopes": token.scopes, "claims": token.claims},
-    }
+    return validate_migration_data(current_engine(), up_sql, down_sql)
 
 
 def run_server() -> None:

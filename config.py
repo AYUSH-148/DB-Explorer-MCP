@@ -22,6 +22,17 @@ def _resolve_database_url() -> str:
     raise RuntimeError("DATABASE_URL must be set when serving over HTTP")
 
 
+def group_database_url(group: str) -> str:
+    """Return the database URL for a token group, read from DATABASE_URL_<GROUP>."""
+    variable = f"DATABASE_URL_{group.upper()}"
+    url = os.getenv(variable)
+    if not url:
+        raise RuntimeError(
+            f"{variable} must be set: MCP_AUTH_TOKENS gives a token the group {group!r}"
+        )
+    return url
+
+
 def _resolve_int(name: str, default: int, minimum: int = 1) -> int:
     raw = os.getenv(name, str(default))
     try:
@@ -49,4 +60,5 @@ DB_POOL_SIZE = _resolve_int("DB_POOL_SIZE", 5)
 DB_MAX_OVERFLOW = _resolve_int("DB_MAX_OVERFLOW", 10, minimum=0)
 DB_POOL_TIMEOUT_SECONDS = _resolve_int("DB_POOL_TIMEOUT_SECONDS", 5)
 MCP_AUTH_TOKEN = os.getenv("MCP_AUTH_TOKEN", "").strip()
+MCP_AUTH_TOKENS = os.getenv("MCP_AUTH_TOKENS", "").strip()
 MCP_ALLOW_UNAUTHENTICATED = _resolve_flag("MCP_ALLOW_UNAUTHENTICATED")
