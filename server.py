@@ -78,11 +78,26 @@ AUDIT_ARGUMENT_LIMIT = 2000
 def current_engine() -> Engine:
     """Return the engine for the caller's token group, or the default engine.
 
-    stdio and tokens without a group have no group, and use DATABASE_URL.
+    stdio and tokens without a group have no group, and use DATABASE_URL. A
+    group with no engine is refused rather than run on DATABASE_URL: it can only
+    come from an auth provider other than MCP_AUTH_TOKENS, and quietly giving it
+    the default login could grant more than that group was meant to see.
     """
     token = get_access_token()
     group = token.claims.get("group") if token else None
-    return group_engines[group] if group else engine
+    if not group:
+        return engine
+    if isinstance(group, str) and group in group_engines:
+        return group_engines[group]
+    raise ToolInputError(
+        code="unknown_group",
+        message="No database login is configured for this caller's group",
+        hint=(
+            "The server builds a database login only for the groups named in "
+            "MCP_AUTH_TOKENS. Ask the operator to add the group there and set "
+            "its DATABASE_URL_<GROUP>."
+        ),
+    )
 
 
 def _caller() -> str:

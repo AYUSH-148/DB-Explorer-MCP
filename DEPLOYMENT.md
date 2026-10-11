@@ -26,7 +26,7 @@ FastMCP Cloud is now presented as Prefect Horizon in the current FastMCP documen
    MCP_ALLOW_UNAUTHENTICATED=true
    ```
 
-   `MCP_ALLOW_UNAUTHENTICATED=true` hands authentication to the platform (step 5). Without it, or an `MCP_AUTH_TOKEN`, the server answers `401` to every request rather than serving the database unprotected. Set it only together with step 5.
+   `MCP_ALLOW_UNAUTHENTICATED=true` hands authentication to the platform (step 5). Without it, or a token in `MCP_AUTH_TOKEN` or `MCP_AUTH_TOKENS`, the server answers `401` to every request rather than serving the database unprotected. Set it only together with step 5.
 
 5. Enable authentication.
 6. Deploy the server.
@@ -43,10 +43,13 @@ On a machine you run yourself, the server checks bearer tokens. Each person or s
 PostgreSQL:
 
 ```sql
+-- dbx_readonly is the DATABASE_URL login: tokens with no group use it.
+CREATE ROLE dbx_readonly LOGIN PASSWORD '<password>';
 CREATE ROLE dbx_analyst LOGIN PASSWORD '<password>';
 CREATE ROLE dbx_finance LOGIN PASSWORD '<password>';
-GRANT CONNECT ON DATABASE app TO dbx_analyst, dbx_finance;
-GRANT USAGE ON SCHEMA public TO dbx_analyst, dbx_finance;
+GRANT CONNECT ON DATABASE app TO dbx_readonly, dbx_analyst, dbx_finance;
+GRANT USAGE ON SCHEMA public TO dbx_readonly, dbx_analyst, dbx_finance;
+GRANT SELECT ON products TO dbx_readonly;
 GRANT SELECT ON orders, products TO dbx_analyst;
 GRANT SELECT ON orders, products, invoices, salaries TO dbx_finance;
 
@@ -59,11 +62,15 @@ CREATE POLICY analyst_eu ON orders FOR SELECT TO dbx_analyst USING (region = 'EU
 CREATE POLICY finance_all ON orders FOR SELECT TO dbx_finance USING (true);
 ```
 
+Once row-level security is on, a login with no policy on the table sees no rows and gets no error, so the table looks empty. Give every login that can read the table a policy, including the `DATABASE_URL` one if it has a grant there.
+
 MySQL:
 
 ```sql
+CREATE USER 'dbx_readonly'@'%' IDENTIFIED BY '<password>';
 CREATE USER 'dbx_analyst'@'%' IDENTIFIED BY '<password>';
 CREATE USER 'dbx_finance'@'%' IDENTIFIED BY '<password>';
+GRANT SELECT ON app.products TO 'dbx_readonly'@'%';
 GRANT SELECT ON app.orders TO 'dbx_analyst'@'%';
 GRANT SELECT ON app.products TO 'dbx_analyst'@'%';
 GRANT SELECT ON app.* TO 'dbx_finance'@'%';
@@ -71,6 +78,10 @@ GRANT SELECT (id, name, email) ON app.users TO 'dbx_analyst'@'%';
 ```
 
 MySQL has no row-level security. To limit rows, grant a view such as `CREATE VIEW app.orders_eu AS SELECT * FROM app.orders WHERE region = 'EU'` and not the table behind it.
+
+Make `DATABASE_URL` the narrowest login, because every token without a group, and stdio, uses it.
+
+With a column grant, `explore_schema(table_name=..., include_sample_data=True)` fails on that table with `permission denied`, because the sample is `SELECT *`. Ask for the table's detail without sample data, or query the granted columns with `execute_query`.
 
 Grant `SELECT` only. Never use the table owner, a superuser or a role with `BYPASSRLS`: row-level security does not apply to them. On PostgreSQL, `explore_schema` still lists a table a group cannot read, because every user can read the catalog; the rows stay protected. Move a table to a schema the group has no `USAGE` on to hide its name too.
 
@@ -97,6 +108,15 @@ DATABASE_URL_FINANCE=postgresql+psycopg2://dbx_finance:<password>@db.internal:54
 `DATABASE_URL` serves tokens with no group (`ci` above). URL-encode a password that contains `@ : / #`, for example `@` as `%40`.
 
 ### 3. Run it as a service
+
+Give the service its own user, and let it own the project folder: `uv run` creates `.venv` there and keeps a cache in the user's home.
+
+```bash
+sudo useradd --system --create-home --home-dir /var/lib/dbx dbx
+sudo git clone https://github.com/<you>/DB-Explorer-MCP.git /opt/db-explorer
+sudo chown -R dbx:dbx /opt/db-explorer
+sudo -u dbx /usr/local/bin/uv sync --directory /opt/db-explorer
+```
 
 `/etc/systemd/system/db-explorer.service`:
 

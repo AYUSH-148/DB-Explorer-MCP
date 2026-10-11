@@ -182,6 +182,7 @@ Hint: Add a WHERE clause, aggregate instead of scanning, or query a smaller tabl
 | `database_unavailable` | The server could not reach the database, or the link dropped mid-query. The driver's text names the host and user, so it goes to the server log and not to the caller |
 | `unsafe_query` | Blocked by [safety.py](safety.py). The hint names the specific rule that fired |
 | `query_too_complex` | The SQL is over 50,000 characters, or past what `sqlparse` will parse: about 10,000 tokens in one list (an `IN (...)` of roughly 3,000 values) or 100 levels of nesting. Applies to `validate_migration` scripts too |
+| `unknown_group` | The caller's token names a group the server has no database login for. Only an auth provider other than `MCP_AUTH_TOKENS` can produce one |
 | `invalid_argument` | An argument out of range, such as `row_limit` below 1 |
 | `missing_argument` / `conflicting_arguments` | `suggest_index` needs exactly one of `query` or `table_name` |
 | `comments_not_allowed` / `unparsable_sql` / `select_in_migration` | `validate_migration` rejected a script |
@@ -198,7 +199,7 @@ Requires Python 3.11+ and [uv](https://docs.astral.sh/uv/).
 ```powershell
 uv sync
 uv run python tests/seed_test_db.py   # creates sample.db
-uv run pytest                         # 322 tests on SQLite; 22 more with TEST_*_URL set
+uv run pytest                         # 323 tests on SQLite; 22 more with TEST_*_URL set
 uv run server.py                      # stdio transport
 ```
 
@@ -347,9 +348,9 @@ $env:MCP_AUTH_TOKEN = python -c "import secrets; print(secrets.token_urlsafe(32)
 uv run server.py
 ```
 
-An HTTP endpoint publishes SELECT on the configured database to anyone who can reach the port, so the server **fails to start** without `MCP_AUTH_TOKEN` rather than coming up unprotected. Clients send it as `Authorization: Bearer <token>`; it is compared in constant time in [auth.py](auth.py). Set `MCP_ALLOW_UNAUTHENTICATED=true` to override on a genuinely trusted network — the server then warns on stderr at every startup.
+An HTTP endpoint publishes SELECT on the configured database to anyone who can reach the port, so the server **fails to start** without `MCP_AUTH_TOKEN` or `MCP_AUTH_TOKENS` rather than coming up unprotected. Clients send a token as `Authorization: Bearer <token>`; it is compared in constant time in [auth.py](auth.py). Set `MCP_ALLOW_UNAUTHENTICATED=true` to override on a genuinely trusted network — the server then warns on stderr at every startup.
 
-A host that loads `server.py:mcp` directly (Horizon, `fastmcp run server.py:mcp --transport http`) never sets `MCP_TRANSPORT`, so the server cannot tell at import that it will serve HTTP. It does not start unprotected: without `MCP_AUTH_TOKEN` or `MCP_ALLOW_UNAUTHENTICATED=true` every HTTP request is answered `401`. stdio ignores the provider, so local use needs neither.
+A host that loads `server.py:mcp` directly (Horizon, `fastmcp run server.py:mcp --transport http`) never sets `MCP_TRANSPORT`, so the server cannot tell at import that it will serve HTTP. It does not start unprotected: without a token or `MCP_ALLOW_UNAUTHENTICATED=true` every HTTP request is answered `401`. stdio ignores the provider, so local use needs neither.
 
 Host and Origin headers are checked on a server bound to a loopback address, so a web page you visit cannot reach a local server through DNS rebinding (`421` for a foreign `Host`, `403` for a foreign `Origin`). FastMCP ships this check off; [server.py](server.py) turns it on unless `FASTMCP_HTTP_HOST_ORIGIN_PROTECTION` is set.
 
@@ -372,7 +373,7 @@ Each group has its own connection pool, so the server can hold up to `DB_POOL_SI
 
 On PostgreSQL, every user can read the system catalog, so `explore_schema` lists a table a group cannot `SELECT`. Its rows stay protected: asking for its detail or querying it fails with `permission denied`. To hide the name as well, move the table to a schema the group has no `USAGE` on. MySQL lists only tables the user has a privilege on. [DEPLOYMENT.md](DEPLOYMENT.md) has the `GRANT` statements for both, and a VM setup with HTTPS.
 
-For OAuth with an identity provider instead, pass one of FastMCP's providers as `auth=` in [server.py](server.py). The group lookup reads `claims["group"]` from the verified token, so a provider that sets that claim works with the group engines as they are. On Prefect Horizon, OAuth with dynamic client registration and PKCE is handled by the platform; see [DEPLOYMENT.md](DEPLOYMENT.md).
+For OAuth with an identity provider instead, pass one of FastMCP's providers as `auth=` in [server.py](server.py). Its callers use `DATABASE_URL`. The group lookup reads `claims["group"]` from the verified token, but engines exist only for the groups named in `MCP_AUTH_TOKENS`, so a provider's token carrying any other group is refused with `unknown_group` rather than run on the default login. Groups from a provider need those engines built from its own configuration. On Prefect Horizon, OAuth with dynamic client registration and PKCE is handled by the platform; see [DEPLOYMENT.md](DEPLOYMENT.md).
 
 **Hosted Supabase note:** direct connections (`db.<ref>.supabase.co`) are IPv6-only, which fails from IPv4-only containers with an empty-looking `psycopg2.OperationalError`. Use the pooler host from the dashboard's *Connect* panel, and note that the username becomes `postgres.<project-ref>`.
 
@@ -382,7 +383,7 @@ For OAuth with an identity provider instead, pass one of FastMCP's providers as 
 uv run pytest
 ```
 
-322 tests covering the safety layer, value serialization, read-only enforcement and timeouts, HTTP authentication and token groups, inspector, explain, index suggestions, schema health, migration validation, error reporting, and the tool wrappers. Each uses a temporary SQLite database, so the suite needs no credentials and no running server.
+323 tests covering the safety layer, value serialization, read-only enforcement and timeouts, HTTP authentication and token groups, inspector, explain, index suggestions, schema health, migration validation, error reporting, and the tool wrappers. Each uses a temporary SQLite database, so the suite needs no credentials and no running server.
 
 SQLite cannot produce the types that break a real driver -- it has no `NUMERIC` and returns `str`/`int` for nearly everything -- so [tests/test_serialization.py](tests/test_serialization.py) exercises `Decimal`, `datetime`, `UUID`, and binary values directly rather than through a query. [tests/test_live_databases.py](tests/test_live_databases.py) covers what SQLite cannot: the read-only transaction, the server-side statement timeout, `NUMERIC`/`TIMESTAMP` values, and catalog reflection, against real PostgreSQL and MySQL. Set `TEST_POSTGRES_URL` and/or `TEST_MYSQL_URL` (a throwaway database: the tests create and drop `dbx_live_*` tables) to run it; unset, it is skipped. CI runs both against service containers.
 

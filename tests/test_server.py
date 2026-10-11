@@ -249,6 +249,22 @@ def test_a_token_group_runs_on_its_own_database_login(
     )
 
 
+def test_a_group_with_no_configured_login_is_refused(
+    configured_engine, monkeypatch, caplog
+):
+    # Only another auth provider can produce one, so it must fail closed rather
+    # than fall back to DATABASE_URL, which may see more than the group should.
+    monkeypatch.setattr(server, "engine", configured_engine)
+    monkeypatch.setattr(server, "group_engines", {"analyst": configured_engine})
+
+    for group in ("finance", ["analyst"]):
+        _signed_in_as(monkeypatch, "alice", group)
+        with caplog.at_level(logging.INFO, logger="db_explorer.audit"):
+            with pytest.raises(ToolError, match=r"\[unknown_group\]"):
+                server.execute_query("SELECT 1")
+        assert " unknown_group user=alice " in caplog.records[-1].getMessage()
+
+
 def test_a_token_without_a_group_uses_the_default_database(
     configured_engine, monkeypatch, caplog
 ):

@@ -7,7 +7,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ```powershell
 uv sync                                # install deps
 uv run python tests/seed_test_db.py    # (re)create sample.db
-uv run pytest                          # 322 SQLite tests; 22 live tests skip unless TEST_*_URL is set
+uv run pytest                          # 323 SQLite tests; 22 live tests skip unless TEST_*_URL is set
 uv run pytest tests/test_safety.py     # run one test file
 uv run pytest tests/test_safety.py::test_name -v   # run a single test
 uv run server.py                       # start server, stdio transport
@@ -15,7 +15,7 @@ uv run server.py                       # start server, stdio transport
 
 `uv run ruff check .` lints (bug-catching rules only, see `[tool.ruff.lint]` in `pyproject.toml`). CI (`.github/workflows/ci.yml`) runs ruff and pytest on every push to `main` and every PR.
 
-To run over HTTP locally, set `MCP_TRANSPORT=streamable-http` (plus `MCP_HOST`/`MCP_PORT`/`MCP_AUTH_TOKEN`) before `uv run server.py` — see README "Serve over HTTP".
+To run over HTTP locally, set `MCP_TRANSPORT=streamable-http` (plus `MCP_HOST`/`MCP_PORT` and `MCP_AUTH_TOKEN` or `MCP_AUTH_TOKENS`) before `uv run server.py` — see README "Serve over HTTP".
 
 If `uv` isn't on `PATH`, prefix commands with `py -m`.
 
@@ -38,11 +38,11 @@ Safety validation is layer one of three — `db.py` adds a statement timeout (`Q
 - `migration.py` — returns schema context and validates `up`/`down` SQL statement types; **never executes DDL**
 - `errors.py` — `ToolInputError` (a `ValueError` subclass) internally; converted to FastMCP `ToolError` only at the `server.py` boundary, because `ToolError` is the one error type that survives `mask_error_details=True`. Every error carries a `code` and a corrective hint.
 - `serialization.py` — driver values (Decimal, datetime, UUID, binary) to JSON-safe primitives
-- `auth.py` — named bearer tokens for HTTP transports (`MCP_AUTH_TOKENS=name:group:token,...`, or a single `MCP_AUTH_TOKEN`), compared in constant time against every entry. A match returns an `AccessToken` with `client_id=<name>` and `claims={"group": ...}`; `server.current_engine` picks the group's engine (`DATABASE_URL_<GROUP>`) from that claim and the audit line records `user=`/`group=`. Access control per group is the database's grants, never server-side filtering
+- `auth.py` — named bearer tokens for HTTP transports (`MCP_AUTH_TOKENS=name:group:token,...`, or a single `MCP_AUTH_TOKEN`), compared in constant time against every entry. A match returns an `AccessToken` with `client_id=<name>` and `claims={"group": ...}`; `server.current_engine` picks the group's engine (`DATABASE_URL_<GROUP>`) from that claim, refusing a group it has no engine for with `unknown_group` rather than falling back to `DATABASE_URL`, and the audit line records `user=`/`group=`. Access control per group is the database's grants, never server-side filtering
 - `config.py` — loads `.env` (local file next to `config.py` first, then CWD `.env`; real env vars win over both), fails fast if `DATABASE_URL`/a token is missing under an HTTP transport, or a token group has no `DATABASE_URL_<GROUP>`. The stdio fallback is `sample.db` next to `config.py` (never CWD-relative), opened `mode=ro`
 
 Transports (stdio vs. streamable-http) run identical tool code; only `MCP_TRANSPORT` changes. HTTP transport requires `MCP_AUTH_TOKEN` or `MCP_AUTH_TOKENS` (min 32 chars per token) unless `MCP_ALLOW_UNAUTHENTICATED=true` is explicitly set. That includes a host that imports `server.py:mcp` and serves HTTP without setting `MCP_TRANSPORT` (Horizon, `fastmcp run`): `auth.py` returns `RejectEveryToken` there, so it answers 401 rather than serving open; stdio ignores the provider. `server.py` also turns on FastMCP's Host/Origin check (off by default) against DNS rebinding.
 
 ## Testing notes
 
-Without `TEST_POSTGRES_URL` / `TEST_MYSQL_URL`, the 322 tests that run use a temporary SQLite database — no credentials, no running server, no network. SQLite can't produce the driver types that matter for correctness (no `NUMERIC`, returns `str`/`int` for nearly everything), so `tests/test_serialization.py` exercises `Decimal`/`datetime`/`UUID`/binary directly rather than through a query. `tests/test_live_databases.py` runs the dialect-specific paths (read-only transaction, statement timeout, NUMERIC/TIMESTAMP serialization, reflection) against real PostgreSQL and MySQL when `TEST_POSTGRES_URL` / `TEST_MYSQL_URL` are set, and skips otherwise. CI sets both via service containers. It creates and drops `dbx_live_*` tables, so only point it at a throwaway database.
+Without `TEST_POSTGRES_URL` / `TEST_MYSQL_URL`, the 323 tests that run use a temporary SQLite database — no credentials, no running server, no network. SQLite can't produce the driver types that matter for correctness (no `NUMERIC`, returns `str`/`int` for nearly everything), so `tests/test_serialization.py` exercises `Decimal`/`datetime`/`UUID`/binary directly rather than through a query. `tests/test_live_databases.py` runs the dialect-specific paths (read-only transaction, statement timeout, NUMERIC/TIMESTAMP serialization, reflection) against real PostgreSQL and MySQL when `TEST_POSTGRES_URL` / `TEST_MYSQL_URL` are set, and skips otherwise. CI sets both via service containers. It creates and drops `dbx_live_*` tables, so only point it at a throwaway database.
