@@ -11,6 +11,8 @@ from fastmcp.exceptions import ToolError
 from fastmcp.server.dependencies import get_access_token
 from sqlalchemy import Engine
 from sqlalchemy.exc import SQLAlchemyError
+from starlette.requests import Request
+from starlette.responses import JSONResponse
 
 from auth import build_auth_provider, token_entries
 from config import (
@@ -39,6 +41,14 @@ from schema_health import validate_schema as validate_schema_data
 # here rather than in run_server(), which a hosted entrypoint never calls.
 if "FASTMCP_HTTP_HOST_ORIGIN_PROTECTION" not in os.environ:
     fastmcp.settings.http_host_origin_protection = "auto"
+
+# By default the HTTP transport keeps each client's session in this process's
+# memory, so behind a load balancer a request that reaches another replica gets
+# 404 "Session not found". No tool streams progress or calls back to the client,
+# and the bearer token is checked on every request anyway, so the session holds
+# nothing this server needs. SSE has no stateless mode, so it keeps sessions.
+if "FASTMCP_STATELESS_HTTP" not in os.environ and MCP_TRANSPORT != "sse":
+    fastmcp.settings.stateless_http = True
 
 TOKEN_ENTRIES = token_entries(MCP_AUTH_TOKEN, MCP_AUTH_TOKENS)
 mcp = FastMCP(
@@ -162,6 +172,17 @@ def tool_errors(
             )
 
     return wrapper
+
+
+@mcp.custom_route("/health", methods=["GET"])
+async def health(_request: Request) -> JSONResponse:
+    """Liveness only: answers without a token, so it reveals nothing.
+
+    It does not touch the database. A database outage would otherwise fail every
+    replica's check at once and restart them all, which fixes nothing; callers
+    already see database errors through the tools.
+    """
+    return JSONResponse({"status": "ok"})
 
 
 def explore_schema_data(

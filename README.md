@@ -199,7 +199,7 @@ Requires Python 3.11+ and [uv](https://docs.astral.sh/uv/).
 ```powershell
 uv sync
 uv run python tests/seed_test_db.py   # creates sample.db
-uv run pytest                         # 323 tests on SQLite; 22 more with TEST_*_URL set
+uv run pytest                         # 324 tests on SQLite; 22 more with TEST_*_URL set
 uv run server.py                      # stdio transport
 ```
 
@@ -354,6 +354,10 @@ A host that loads `server.py:mcp` directly (Horizon, `fastmcp run server.py:mcp 
 
 Host and Origin headers are checked on a server bound to a loopback address, so a web page you visit cannot reach a local server through DNS rebinding (`421` for a foreign `Host`, `403` for a foreign `Origin`). FastMCP ships this check off; [server.py](server.py) turns it on unless `FASTMCP_HTTP_HOST_ORIGIN_PROTECTION` is set.
 
+The streamable-http transport runs stateless: it issues no `mcp-session-id`, so any replica behind a load balancer can answer any request, and a restart drops no client. The bearer token is still checked on every request. Set `FASTMCP_STATELESS_HTTP=false` to get sessions back; SSE always keeps them.
+
+`GET /health` answers `{"status": "ok"}` without a token, for load-balancer and platform probes. It reports only that the process is up: it never touches the database, so a database outage does not restart every replica at once.
+
 ### Named tokens and groups
 
 Give each person or service its own token, and optionally a group whose database user decides what it can read:
@@ -383,7 +387,7 @@ For OAuth with an identity provider instead, pass one of FastMCP's providers as 
 uv run pytest
 ```
 
-323 tests covering the safety layer, value serialization, read-only enforcement and timeouts, HTTP authentication and token groups, inspector, explain, index suggestions, schema health, migration validation, error reporting, and the tool wrappers. Each uses a temporary SQLite database, so the suite needs no credentials and no running server.
+324 tests covering the safety layer, value serialization, read-only enforcement and timeouts, HTTP authentication and token groups, inspector, explain, index suggestions, schema health, migration validation, error reporting, and the tool wrappers. Each uses a temporary SQLite database, so the suite needs no credentials and no running server.
 
 SQLite cannot produce the types that break a real driver -- it has no `NUMERIC` and returns `str`/`int` for nearly everything -- so [tests/test_serialization.py](tests/test_serialization.py) exercises `Decimal`, `datetime`, `UUID`, and binary values directly rather than through a query. [tests/test_live_databases.py](tests/test_live_databases.py) covers what SQLite cannot: the read-only transaction, the server-side statement timeout, `NUMERIC`/`TIMESTAMP` values, and catalog reflection, against real PostgreSQL and MySQL. Set `TEST_POSTGRES_URL` and/or `TEST_MYSQL_URL` (a throwaway database: the tests create and drop `dbx_live_*` tables) to run it; unset, it is skipped. CI runs both against service containers.
 
