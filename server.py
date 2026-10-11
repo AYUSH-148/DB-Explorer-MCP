@@ -1,6 +1,9 @@
+import base64
 import inspect
+import json
 import logging
 import os
+import re
 from collections.abc import Callable
 from functools import wraps
 from typing import Any, ParamSpec, TypeVar
@@ -8,6 +11,7 @@ from typing import Any, ParamSpec, TypeVar
 import fastmcp
 from fastmcp import FastMCP
 from fastmcp.exceptions import ToolError
+from fastmcp.server.dependencies import get_access_token, get_http_headers
 from sqlalchemy.exc import SQLAlchemyError
 
 from auth import build_auth_provider
@@ -217,6 +221,43 @@ def validate_migration(up_sql: str, down_sql: str) -> dict[str, Any]:
     the script is run.
     """
     return validate_migration_data(engine, up_sql, down_sql)
+
+
+# TEMPORARY: remove once we know what identity Horizon forwards to the server.
+# It reports what reached the server for the caller's own request, and never a
+# value from a header whose name suggests a secret.
+_SECRET_HEADER = re.compile(r"auth|cookie|key|secret|token", re.IGNORECASE)
+
+
+def _unverified_claims(token: str) -> dict[str, Any] | None:
+    # Payload only, signature not checked: this is a diagnostic, not a decision.
+    parts = token.split(".")
+    if len(parts) != 3:
+        return None
+    try:
+        payload = parts[1] + "=" * (-len(parts[1]) % 4)
+        return json.loads(base64.urlsafe_b64decode(payload))
+    except ValueError:
+        return None
+
+
+@mcp.tool
+def whoami() -> dict[str, Any]:
+    """Temporary diagnostic: show which caller identity reached the server."""
+    headers = get_http_headers(include_all=True)
+    bearer = headers.get("authorization", "").removeprefix("Bearer ").strip()
+    token = get_access_token()
+    return {
+        "headers": {
+            name: "<redacted>" if _SECRET_HEADER.search(name) else value
+            for name, value in headers.items()
+        },
+        "bearer_present": bool(bearer),
+        "bearer_claims": _unverified_claims(bearer),
+        "access_token": None
+        if token is None
+        else {"client_id": token.client_id, "scopes": token.scopes, "claims": token.claims},
+    }
 
 
 def run_server() -> None:
