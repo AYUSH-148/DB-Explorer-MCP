@@ -1,6 +1,7 @@
 import inspect
 import logging
 import os
+from collections import Counter
 from collections.abc import Callable
 from functools import wraps
 from typing import Any, ParamSpec, TypeVar
@@ -9,6 +10,7 @@ import fastmcp
 from fastmcp import FastMCP
 from fastmcp.exceptions import ToolError
 from fastmcp.server.dependencies import get_access_token
+from fastmcp.server.middleware import CallNext, Middleware, MiddlewareContext
 from sqlalchemy import Engine
 from sqlalchemy.exc import SQLAlchemyError
 from starlette.requests import Request
@@ -20,6 +22,7 @@ from config import (
     MCP_ALLOW_UNAUTHENTICATED,
     MCP_AUTH_TOKEN,
     MCP_AUTH_TOKENS,
+    MAX_CONCURRENT_CALLS_PER_CLIENT,
     MCP_HOST,
     MCP_PORT,
     MCP_TRANSPORT,
@@ -174,6 +177,55 @@ def tool_errors(
     return wrapper
 
 
+class ConcurrentCallLimit(Middleware):
+    """Refuse a token's call while it already has the maximum number running.
+
+    The pool is shared, so without this one token firing calls in parallel could
+    hold every connection and leave other callers with server_busy. Refusing at
+    once, before a worker thread or connection is taken, tells the caller to wait
+    for its own calls instead of queueing behind them. Calls with no token (stdio,
+    or MCP_ALLOW_UNAUTHENTICATED) are not limited: there is no one to tell apart.
+    ponytail: counted per process, so N replicas allow N times the limit.
+    """
+
+    def __init__(self, limit: int) -> None:
+        self.limit = limit
+        # Only touched on the event loop, between awaits, so it needs no lock.
+        self.running: Counter[str] = Counter()
+
+    async def on_call_tool(
+        self, context: MiddlewareContext, call_next: CallNext
+    ) -> Any:
+        token = get_access_token()
+        if token is None:
+            return await call_next(context)
+        client = token.client_id
+        if self.running[client] >= self.limit:
+            audit_log.info(
+                "%s too_many_concurrent_calls%s", context.message.name, _caller()
+            )
+            refused = ToolInputError(
+                code="too_many_concurrent_calls",
+                message=(
+                    f"This caller already has {self.limit} tool calls running; "
+                    "no query was run"
+                ),
+                hint=(
+                    "Wait for a running call to finish, then retry this one "
+                    "unchanged. Run fewer calls in parallel."
+                ),
+            )
+            raise ToolError(refused.as_text())
+        self.running[client] += 1
+        try:
+            return await call_next(context)
+        finally:
+            self.running[client] -= 1
+
+
+mcp.add_middleware(ConcurrentCallLimit(MAX_CONCURRENT_CALLS_PER_CLIENT))
+
+
 @mcp.custom_route("/health", methods=["GET"])
 async def health(_request: Request) -> JSONResponse:
     """Liveness only: answers without a token, so it reveals nothing.
@@ -214,7 +266,11 @@ def explore_schema(
     limit: int = DEFAULT_TABLE_LIMIT,
     offset: int = 0,
 ) -> dict[str, Any]:
-    """Explore database tables, columns, keys, indexes, and sample rows."""
+    """Explore database tables, columns, keys, indexes, and sample rows.
+
+    A listing comes in pages. A page can hold fewer tables than limit when it
+    reaches the size cap, so continue with offset=next_offset, never offset+limit.
+    """
     return explore_schema_data(
         table_name,
         include_sample_data,
@@ -272,7 +328,11 @@ def migration_context(
     limit: int = DEFAULT_TABLE_LIMIT,
     offset: int = 0,
 ) -> dict[str, Any]:
-    """Return dialect and one page of table detail for client-side migration drafting."""
+    """Return dialect and one page of table detail for client-side migration drafting.
+
+    A page can hold fewer tables than limit when it reaches the size cap, so
+    continue with offset=next_offset, never offset+limit.
+    """
     return get_migration_context(current_engine(), name_pattern, limit, offset)
 
 

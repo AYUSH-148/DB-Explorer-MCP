@@ -1,5 +1,7 @@
+import asyncio
 import logging
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from fastmcp import FastMCP
@@ -288,3 +290,41 @@ def test_a_token_without_a_group_uses_the_default_database(
 
     assert result["rows"][0]["n"] > 0
     assert " user=ci group=- {" in caplog.records[-1].getMessage()
+
+
+def test_one_token_cannot_run_more_than_its_share_of_calls(monkeypatch):
+    # Two calls from alice are held open; her third is refused at once, while
+    # bob still gets through and alice gets her slot back once a call ends.
+    limit = server.ConcurrentCallLimit(2)
+    context = SimpleNamespace(message=SimpleNamespace(name="execute_query"))
+    release = asyncio.Event()
+    caller = {}
+    monkeypatch.setattr(server, "get_access_token", lambda: caller["token"])
+
+    def signed_in(name):
+        caller["token"] = AccessToken(token="t", client_id=name, scopes=[], claims={})
+
+    async def held_call(_context):
+        await release.wait()
+        return "done"
+
+    async def scenario():
+        signed_in("alice")
+        running = [asyncio.create_task(limit.on_call_tool(context, held_call))]
+        await asyncio.sleep(0)
+        running.append(asyncio.create_task(limit.on_call_tool(context, held_call)))
+        await asyncio.sleep(0)
+        with pytest.raises(ToolError, match="too_many_concurrent_calls"):
+            await limit.on_call_tool(context, held_call)
+
+        signed_in("bob")
+        running.append(asyncio.create_task(limit.on_call_tool(context, held_call)))
+        await asyncio.sleep(0)
+        release.set()
+        assert await asyncio.gather(*running) == ["done"] * 3
+
+        signed_in("alice")
+        assert await limit.on_call_tool(context, held_call) == "done"
+        assert limit.running == {"alice": 0, "bob": 0}
+
+    asyncio.run(scenario())

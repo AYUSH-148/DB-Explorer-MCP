@@ -221,3 +221,20 @@ def test_a_broken_view_asked_for_by_name_reports_instead_of_raising(engine):
     assert "error" in details
     assert "row_count" not in details
     assert "sample_rows" not in details
+
+
+def test_an_oversized_detail_page_is_cut_and_continues_at_next_offset(
+    engine, monkeypatch
+):
+    full = get_schema_page(engine, detail=True)
+    monkeypatch.setattr("inspector.MAX_RESULT_BYTES", 1)
+
+    first = get_schema_page(engine, detail=True)
+    second = get_schema_page(engine, detail=True, offset=first["next_offset"])
+
+    assert "note" not in full
+    assert first["tables"] == full["tables"][:1]
+    assert first["has_more"] is True
+    assert first["next_offset"] == 1
+    assert "offset=next_offset" in first["note"]
+    assert second["tables"] == full["tables"][1:2]

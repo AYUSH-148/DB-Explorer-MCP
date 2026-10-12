@@ -9,7 +9,8 @@ computed only for a single named table, and stop at ROW_COUNT_CAP.
 from __future__ import annotations
 
 import fnmatch
-from collections.abc import Callable, Sequence
+import json
+from collections.abc import Callable, Iterable, Iterator, Sequence
 from typing import Any, NamedTuple
 
 from sqlalchemy import Connection, Engine, inspect
@@ -18,12 +19,17 @@ from sqlalchemy.exc import SQLAlchemyError
 
 from db import execute_raw, read_only_connection
 from errors import ToolInputError, from_database_error, table_not_found
+from safety import MAX_RESULT_BYTES
 from serialization import jsonable, jsonable_rows
 
 # A summary row is small, but a warehouse has thousands of tables. Bound the page so
 # one call cannot spend a whole context window on a listing.
 DEFAULT_TABLE_LIMIT = 200
 MAX_TABLE_LIMIT = 1000
+
+# Tables reflected per round trip on a detail page. Small enough that a page cut
+# for size reflects little it then drops; large enough to stay a few queries.
+DETAIL_BATCH = 50
 
 # Past this many rows, row_count reports the cap and row_count_capped is true.
 ROW_COUNT_CAP = 100_000
@@ -263,6 +269,15 @@ def _row_count(connection: Connection, table_name: str) -> tuple[int, bool]:
     return min(count, ROW_COUNT_CAP), count > ROW_COUNT_CAP
 
 
+def _detail_payloads(inspector: Inspector, page: _Page) -> Iterator[dict[str, Any]]:
+    """Yield full detail for each table on the page, reflecting DETAIL_BATCH at a time."""
+    for start in range(0, len(page.names), DETAIL_BATCH):
+        batch = page.names[start : start + DETAIL_BATCH]
+        reflected = _reflect(inspector, batch)
+        for name in batch:
+            yield _table_payload(name, page.kinds[name], reflected[name])
+
+
 def get_schema_page(
     engine: Engine,
     name_pattern: str | None = None,
@@ -276,14 +291,10 @@ def get_schema_page(
         page = select_names(inspector, name_pattern, limit, offset)
 
         if detail:
-            reflected = _reflect(inspector, page.names)
-            tables = [
-                _table_payload(name, page.kinds[name], reflected[name])
-                for name in page.names
-            ]
+            payloads: Iterable[dict[str, Any]] = _detail_payloads(inspector, page)
         else:
             columns = _column_lists(inspector, page.names)
-            tables = [
+            payloads = [
                 {"name": name, "kind": page.kinds[name], "error": _UNREADABLE}
                 if columns[name] is None
                 else {
@@ -294,16 +305,37 @@ def get_schema_page(
                 for name in page.names
             ]
 
+        # A detail page of wide tables can run to megabytes. Cut it like a query
+        # result, keeping the first table so the page is never empty, and let
+        # next_offset pick up where the cut fell. Detail is reflected batch by
+        # batch, so a cut also stops reflecting the tables it would drop.
+        tables: list[dict[str, Any]] = []
+        cut = False
+        size = 0
+        for table in payloads:
+            size += len(json.dumps(table))
+            if tables and size > MAX_RESULT_BYTES:
+                cut = True
+                break
+            tables.append(table)
+    has_more = page.offset + len(tables) < page.total
+
     result: dict[str, Any] = {
         "tables": tables,
         "total_matching_tables": page.total,
         "returned": len(tables),
         "offset": page.offset,
         "limit": page.limit,
-        "has_more": page.has_more,
+        "has_more": has_more,
     }
-    if page.has_more:
+    if has_more:
         result["next_offset"] = page.offset + len(tables)
+    if cut:
+        result["note"] = (
+            f"The page was cut to {len(tables)} tables to stay under "
+            f"{MAX_RESULT_BYTES} bytes. Call again with offset=next_offset for "
+            "the rest, or narrow it with name_pattern."
+        )
     if not detail:
         result["detail_hint"] = (
             "Call explore_schema(table_name=...) for columns, keys, indexes, "
