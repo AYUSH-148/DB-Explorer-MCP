@@ -59,6 +59,8 @@ QUERY_TIMEOUT_SECONDS = _resolve_int("QUERY_TIMEOUT_SECONDS", 15)
 DB_POOL_SIZE = _resolve_int("DB_POOL_SIZE", 5)
 DB_MAX_OVERFLOW = _resolve_int("DB_MAX_OVERFLOW", 10, minimum=0)
 DB_POOL_TIMEOUT_SECONDS = _resolve_int("DB_POOL_TIMEOUT_SECONDS", 5)
+# Kept below the pool's 15 connections, so one token cannot take them all.
+MAX_CONCURRENT_CALLS_PER_CLIENT = _resolve_int("MAX_CONCURRENT_CALLS_PER_CLIENT", 5)
 MCP_AUTH_TOKEN = os.getenv("MCP_AUTH_TOKEN", "").strip()
 MCP_AUTH_TOKENS = os.getenv("MCP_AUTH_TOKENS", "").strip()
 MCP_ALLOW_UNAUTHENTICATED = _resolve_flag("MCP_ALLOW_UNAUTHENTICATED")

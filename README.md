@@ -182,6 +182,7 @@ Hint: Add a WHERE clause, aggregate instead of scanning, or query a smaller tabl
 | `database_unavailable` | The server could not reach the database, or the link dropped mid-query. The driver's text names the host and user, so it goes to the server log and not to the caller |
 | `unsafe_query` | Blocked by [safety.py](safety.py). The hint names the specific rule that fired |
 | `query_too_complex` | The SQL is over 50,000 characters, or past what `sqlparse` will parse: about 10,000 tokens in one list (an `IN (...)` of roughly 3,000 values) or 100 levels of nesting. Applies to `validate_migration` scripts too |
+| `too_many_concurrent_calls` | The caller's token already has `MAX_CONCURRENT_CALLS_PER_CLIENT` calls running. Refused before any query runs, so one token cannot hold every pooled connection |
 | `unknown_group` | The caller's token names a group the server has no database login for. Only an auth provider other than `MCP_AUTH_TOKENS` can produce one |
 | `invalid_argument` | An argument out of range, such as `row_limit` below 1 |
 | `missing_argument` / `conflicting_arguments` | `suggest_index` needs exactly one of `query` or `table_name` |
@@ -199,7 +200,7 @@ Requires Python 3.11+ and [uv](https://docs.astral.sh/uv/).
 ```powershell
 uv sync
 uv run python tests/seed_test_db.py   # creates sample.db
-uv run pytest                         # 324 tests on SQLite; 22 more with TEST_*_URL set
+uv run pytest                         # 326 tests on SQLite; 22 more with TEST_*_URL set
 uv run server.py                      # stdio transport
 ```
 
@@ -326,6 +327,7 @@ To watch the guardrails work, ask it to run `DELETE FROM users`. The call fails 
 | `DB_POOL_SIZE` | `5` | Connections kept open to the database |
 | `DB_MAX_OVERFLOW` | `10` | Extra connections opened under load, closed when returned |
 | `DB_POOL_TIMEOUT_SECONDS` | `5` | How long a call waits for a free connection before failing with `server_busy` |
+| `MAX_CONCURRENT_CALLS_PER_CLIENT` | `5` | Tool calls one token can have running at once; one more fails with `too_many_concurrent_calls`. Counted per server process, so N replicas allow N times this. Calls without a token (stdio, `MCP_ALLOW_UNAUTHENTICATED`) are not limited |
 | `MCP_AUTH_TOKEN` | — | One shared token. This or `MCP_AUTH_TOKENS` is **required** when serving over HTTP, including a host that loads `server.py:mcp` itself. Minimum 32 characters |
 | `MCP_AUTH_TOKENS` | — | Named tokens, `name:token` or `name:group:token`, comma-separated. Use instead of `MCP_AUTH_TOKEN`, not with it. See [Named tokens and groups](#named-tokens-and-groups) |
 | `DATABASE_URL_<GROUP>` | — | The database URL for one token group, for example `DATABASE_URL_ANALYST`. **Required** for every group `MCP_AUTH_TOKENS` names |
@@ -387,7 +389,7 @@ For OAuth with an identity provider instead, pass one of FastMCP's providers as 
 uv run pytest
 ```
 
-324 tests covering the safety layer, value serialization, read-only enforcement and timeouts, HTTP authentication and token groups, inspector, explain, index suggestions, schema health, migration validation, error reporting, and the tool wrappers. Each uses a temporary SQLite database, so the suite needs no credentials and no running server.
+326 tests covering the safety layer, value serialization, read-only enforcement and timeouts, HTTP authentication and token groups, inspector, explain, index suggestions, schema health, migration validation, error reporting, and the tool wrappers. Each uses a temporary SQLite database, so the suite needs no credentials and no running server.
 
 SQLite cannot produce the types that break a real driver -- it has no `NUMERIC` and returns `str`/`int` for nearly everything -- so [tests/test_serialization.py](tests/test_serialization.py) exercises `Decimal`, `datetime`, `UUID`, and binary values directly rather than through a query. [tests/test_live_databases.py](tests/test_live_databases.py) covers what SQLite cannot: the read-only transaction, the server-side statement timeout, `NUMERIC`/`TIMESTAMP` values, and catalog reflection, against real PostgreSQL and MySQL. Set `TEST_POSTGRES_URL` and/or `TEST_MYSQL_URL` (a throwaway database: the tests create and drop `dbx_live_*` tables) to run it; unset, it is skipped. CI runs both against service containers.
 
@@ -423,7 +425,7 @@ tests/            pytest suite over temporary SQLite databases
   This is left as a rejection rather than fixed by unwrapping, because the incidence is near zero — a caller writes the plain `SELECT` — and widening what the parser accepts to serve a query nobody sends is a poor trade against the risk. What *was* fixed is the explanation: these reasons and a genuine write both contain `Only SELECT`, so they used to collapse to the same hint, and a caller that sent a read was told the server is read-only and pointed at `validate_migration`. `Got: UNKNOWN` now carries its own hint naming the shapes that cause it. A rejection the caller can recover from in one turn is an acceptable cost; a rejection that misdiagnoses itself is not.
 - **SQL is capped at 50,000 characters before parsing.** `sqlparse` spends about 0.9 s of CPU on 50 KB of dense SQL such as a long `IN (...)` list and about 2.7 s on 100 KB, and refuses more than 10,000 tokens in one list long before either, so the cap costs nothing a query could have used. Past either limit the call fails with `query_too_complex` rather than `internal_error`.
 - **The row cap is a context guard, not a performance guard.** A heavy aggregate still runs in full on the database before its output is limited. `QUERY_TIMEOUT_SECONDS` is what bounds the cost of that work.
-- **Long text is cut, and so is a large result.** `row_limit` bounds rows, not bytes, so one 5 MB text cell used to arrive whole. A text value over 2000 characters arrives as its first 2000 followed by `... [truncated: N characters in total]`, in `execute_query`, `explain_query` and `explore_schema` sample rows alike. `execute_query` also stops adding rows once the result passes 500,000 bytes, sets `truncated`, and says in `note` that a higher `row_limit` will not help. The first row is always kept.
+- **Long text is cut, and so is a large result.** `row_limit` bounds rows, not bytes, so one 5 MB text cell used to arrive whole. A text value over 2000 characters arrives as its first 2000 followed by `... [truncated: N characters in total]`, in `execute_query`, `explain_query` and `explore_schema` sample rows alike. `execute_query` also stops adding rows once the result passes 500,000 bytes, sets `truncated`, and says in `note` that a higher `row_limit` will not help. The first row is always kept. A page of `explore_schema` or `migration_context` is cut the same way at 500,000 bytes: it returns fewer tables than `limit`, with `has_more`, `next_offset` and a `note`, so a call with `detail=True` over a thousand wide tables arrives as several pages rather than megabytes in one. Detail is reflected 50 tables at a time, so the cut also skips the work for tables it would drop.
 - **MariaDB is not tested.** It shares the MySQL code path, but CI runs only PostgreSQL and MySQL. MariaDB's documentation says it may drop an `ORDER BY` inside a subquery that has no `LIMIT`, and every query here is wrapped in one, so on MariaDB a truncated, ordered result may not be the true top N. Add your own `LIMIT` to an ordered query there.
 - **Binary columns are summarised, not returned.** Values up to 256 bytes arrive hex-encoded, which suits `BINARY(16)` UUIDs and digests; anything larger is reported as a size only. Inlining a multi-megabyte blob would consume the context window it was sent to.
 - **Wide `NUMERIC` values arrive as strings.** A decimal that fits a float is a JSON number so it sorts and compares correctly; one that does not keeps its exact digits rather than being silently rounded.
