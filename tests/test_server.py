@@ -223,6 +223,17 @@ def test_a_loopback_http_server_refuses_a_foreign_origin():
     assert response.status_code == 403
 
 
+def test_health_answers_without_a_token_while_tools_still_need_one():
+    # A load balancer probing /health has no bearer token; /mcp must stay guarded.
+    with TestClient(server.mcp.http_app(), base_url="http://127.0.0.1:8000") as client:
+        health = client.get("/health")
+        tools = client.post("/mcp", json={})
+
+    assert health.status_code == 200
+    assert health.json() == {"status": "ok"}
+    assert tools.status_code == 401
+
+
 def _signed_in_as(monkeypatch, name, group):
     token = AccessToken(token="t", client_id=name, scopes=[], claims={"group": group})
     monkeypatch.setattr(server, "get_access_token", lambda: token)
