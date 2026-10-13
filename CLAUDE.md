@@ -7,7 +7,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ```powershell
 uv sync                                # install deps
 uv run python tests/seed_test_db.py    # (re)create sample.db
-uv run pytest                          # 326 SQLite tests; 22 live tests skip unless TEST_*_URL is set
+uv run pytest                          # 328 SQLite tests; 24 live tests skip unless TEST_*_URL is set
 uv run pytest tests/test_safety.py     # run one test file
 uv run pytest tests/test_safety.py::test_name -v   # run a single test
 uv run server.py                       # start server, stdio transport
@@ -45,4 +45,4 @@ Transports (stdio vs. streamable-http) run identical tool code; only `MCP_TRANSP
 
 ## Testing notes
 
-Without `TEST_POSTGRES_URL` / `TEST_MYSQL_URL`, the 326 tests that run use a temporary SQLite database — no credentials, no running server, no network. SQLite can't produce the driver types that matter for correctness (no `NUMERIC`, returns `str`/`int` for nearly everything), so `tests/test_serialization.py` exercises `Decimal`/`datetime`/`UUID`/binary directly rather than through a query. `tests/test_live_databases.py` runs the dialect-specific paths (read-only transaction, statement timeout, NUMERIC/TIMESTAMP serialization, reflection) against real PostgreSQL and MySQL when `TEST_POSTGRES_URL` / `TEST_MYSQL_URL` are set, and skips otherwise. CI sets both via service containers. It creates and drops `dbx_live_*` tables, so only point it at a throwaway database.
+Without `TEST_POSTGRES_URL` / `TEST_MYSQL_URL`, the 328 tests that run use a temporary SQLite database — no credentials, no running server, no network. SQLite can't produce the driver types that matter for correctness (no `NUMERIC`, returns `str`/`int` for nearly everything), so `tests/test_serialization.py` exercises `Decimal`/`datetime`/`UUID`/binary directly rather than through a query. `tests/test_live_databases.py` runs the dialect-specific paths (read-only transaction, statement timeout, NUMERIC/TIMESTAMP serialization, reflection) against real PostgreSQL and MySQL when `TEST_POSTGRES_URL` / `TEST_MYSQL_URL` are set, and skips otherwise. CI sets both via service containers. It creates and drops `dbx_live_*` tables, so only point it at a throwaway database.

@@ -50,11 +50,19 @@ SCHEMA = [
 # Enough rows, with statistics, that PostgreSQL's planner uses the primary key for
 # an equality lookup instead of scanning, as it rightly does on a two-row table.
 # MySQL reads a primary-key equality as access type const at any size.
+#
+# Each backend also gets a table and a column comment, in its own syntax.
 EXTRA_SETUP = {
     "postgresql": [
         "INSERT INTO dbx_live_users"
         " SELECT g, 'User' || g, 0, TIMESTAMP '2026-01-01' FROM generate_series(3, 2000) g",
         "ANALYZE dbx_live_users",
+        "COMMENT ON TABLE dbx_live_users IS 'Registered users'",
+        "COMMENT ON COLUMN dbx_live_users.name IS 'Display name'",
+    ],
+    "mysql": [
+        "ALTER TABLE dbx_live_users COMMENT = 'Registered users',"
+        " MODIFY name VARCHAR(50) NOT NULL COMMENT 'Display name'",
     ],
 }
 
@@ -200,6 +208,19 @@ def test_table_detail_reflects_keys(engine):
             "referred_columns": ["id"],
         }
     ]
+
+
+def test_table_detail_reflects_comments(engine):
+    details = get_table_detail(engine, "dbx_live_users")
+    columns = {column["name"]: column for column in details["columns"]}
+
+    assert columns["name"]["comment"] == "Display name"
+    # MySQL under sql_mode ANSI hides table comments from reflection; see
+    # _reflect_batch.
+    if engine.dialect.name == "postgresql":
+        assert details["comment"] == "Registered users"
+    # A column without a comment carries no comment key at all.
+    assert "comment" not in columns["balance"]
 
 
 def test_unindexed_foreign_key_is_reported_where_one_exists(engine):

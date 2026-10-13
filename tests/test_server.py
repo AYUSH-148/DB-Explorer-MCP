@@ -4,7 +4,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from fastmcp import FastMCP
+from fastmcp import Client, FastMCP
 from fastmcp.exceptions import ToolError
 from fastmcp.server.auth import AccessToken
 from starlette.testclient import TestClient
@@ -59,6 +59,34 @@ def test_explore_schema_tool_can_expand_the_page(configured_engine, monkeypatch)
         "user_id",
         "total",
     ]
+
+
+def test_explore_schema_names_the_dialect(configured_engine, monkeypatch):
+    monkeypatch.setattr(server, "engine", configured_engine)
+
+    assert server.explore_schema_data()["dialect"] == "sqlite"
+    assert server.explore_schema_data("users")["dialect"] == "sqlite"
+
+
+def test_clients_see_instructions_annotations_and_parameter_descriptions():
+    # The model reads only this metadata, never the code, to pick a tool and
+    # fill in its arguments.
+    async def scenario():
+        async with Client(server.mcp) as client:
+            assert client.initialize_result.instructions
+            return await client.list_tools()
+
+    tools = asyncio.run(scenario())
+
+    assert len(tools) == 7
+    for tool in tools:
+        assert tool.annotations.readOnlyHint is True, tool.name
+        undescribed = [
+            name
+            for name, schema in tool.inputSchema["properties"].items()
+            if not schema.get("description")
+        ]
+        assert undescribed == [], tool.name
 
 
 def test_explore_schema_tool_returns_table_detail(configured_engine, monkeypatch):

@@ -61,12 +61,17 @@ class _Page(NamedTuple):
 
 
 def _column_info(column: dict[str, Any]) -> dict[str, Any]:
-    return {
+    info = {
         "name": column["name"],
         "type": str(column["type"]),
         "nullable": column["nullable"],
         "default": jsonable(column.get("default")),
     }
+    # A comment is often the only record of what a column means. Most columns
+    # have none, so the key is left out rather than sent as null on every one.
+    if column.get("comment"):
+        info["comment"] = column["comment"]
+    return info
 
 
 def _matches(table_name: str, pattern: str) -> bool:
@@ -203,7 +208,7 @@ def _reflect_batch(
     inspector: Inspector,
     table_names: Sequence[str],
 ) -> dict[str, dict[str, Any]]:
-    """Reflect a set of tables in four queries rather than four per table.
+    """Reflect a set of tables in five queries rather than five per table.
 
     ObjectKind.ANY includes views; the default kind silently drops them.
     """
@@ -212,6 +217,15 @@ def _reflect_batch(
     primary_keys = inspector.get_multi_pk_constraint(**options)
     foreign_keys = inspector.get_multi_foreign_keys(**options)
     indexes = inspector.get_multi_indexes(**options)
+    # SQLite has no comments, and its dialect raises NotImplementedError for them.
+    # ponytail: MySQL table comments come from SHOW CREATE TABLE, which leaves
+    # table options out under sql_mode ANSI, so such a server reports none. Read
+    # information_schema.TABLES.TABLE_COMMENT if that matters.
+    comments = (
+        inspector.get_multi_table_comment(**options)
+        if inspector.dialect.supports_comments
+        else {}
+    )
 
     return {
         name: {
@@ -219,6 +233,7 @@ def _reflect_batch(
             "primary_key": primary_keys.get((_DEFAULT_SCHEMA, name)) or {},
             "foreign_keys": foreign_keys.get((_DEFAULT_SCHEMA, name), []),
             "indexes": indexes.get((_DEFAULT_SCHEMA, name), []),
+            "comment": (comments.get((_DEFAULT_SCHEMA, name)) or {}).get("text"),
         }
         for name in table_names
     }
@@ -229,9 +244,11 @@ def _table_payload(
 ) -> dict[str, Any]:
     if reflected is None:
         return {"name": table_name, "kind": kind, "error": _UNREADABLE}
+    payload: dict[str, Any] = {"name": table_name, "kind": kind}
+    if reflected["comment"]:
+        payload["comment"] = reflected["comment"]
     return {
-        "name": table_name,
-        "kind": kind,
+        **payload,
         "columns": [_column_info(column) for column in reflected["columns"]],
         "primary_key": reflected["primary_key"].get("constrained_columns", []),
         "foreign_keys": [
@@ -321,6 +338,9 @@ def get_schema_page(
     has_more = page.offset + len(tables) < page.total
 
     result: dict[str, Any] = {
+        # The caller writes the SQL, and LIMIT vs TOP, quoting and date functions
+        # all depend on which database will run it.
+        "dialect": engine.dialect.name,
         "tables": tables,
         "total_matching_tables": page.total,
         "returned": len(tables),
@@ -357,7 +377,10 @@ def get_table_detail(
             raise table_not_found(table_name, list(kinds))
 
         reflected = _reflect(inspector, [table_name])[table_name]
-        details = _table_payload(table_name, kinds[table_name], reflected)
+        details = {
+            "dialect": engine.dialect.name,
+            **_table_payload(table_name, kinds[table_name], reflected),
+        }
         if reflected is None:
             return details
         # No count for a view: it would run the view's whole query and could time
