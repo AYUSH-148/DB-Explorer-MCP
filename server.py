@@ -4,13 +4,15 @@ import os
 from collections import Counter
 from collections.abc import Callable
 from functools import wraps
-from typing import Any, ParamSpec, TypeVar
+from typing import Annotated, Any, ParamSpec, TypeVar
 
 import fastmcp
 from fastmcp import FastMCP
 from fastmcp.exceptions import ToolError
 from fastmcp.server.dependencies import get_access_token
 from fastmcp.server.middleware import CallNext, Middleware, MiddlewareContext
+from mcp.types import ToolAnnotations
+from pydantic import Field
 from sqlalchemy import Engine
 from sqlalchemy.exc import SQLAlchemyError
 from starlette.requests import Request
@@ -31,10 +33,15 @@ from config import (
 from db import create_configured_engine, engine_timeout_seconds
 from errors import ToolInputError, from_database_error
 from explain import explain_safe
-from inspector import DEFAULT_TABLE_LIMIT, get_schema_page, get_table_detail
+from inspector import (
+    DEFAULT_TABLE_LIMIT,
+    MAX_TABLE_LIMIT,
+    get_schema_page,
+    get_table_detail,
+)
 from index_suggest import suggest_indexes
 from migration import get_migration_context, validate_migration as validate_migration_data
-from safety import execute_safe
+from safety import MAX_ROW_LIMIT, execute_safe
 from schema_health import validate_schema as validate_schema_data
 
 
@@ -53,9 +60,56 @@ if "FASTMCP_HTTP_HOST_ORIGIN_PROTECTION" not in os.environ:
 if "FASTMCP_STATELESS_HTTP" not in os.environ and MCP_TRANSPORT != "sse":
     fastmcp.settings.stateless_http = True
 
+# Sent to the client once, when it connects. The model reads this and the tool
+# descriptions, never the README, so the workflow has to be stated here.
+INSTRUCTIONS = """\
+Read-only access to one SQL database. Nothing here can change data or schema:
+queries must be a single SELECT, and migration scripts are checked, never run.
+
+Typical flow: explore_schema() to list tables and learn the SQL dialect, then
+explore_schema(table_name=...) for one table's columns and keys, then
+execute_query. For a slow query, use explain_query or suggest_index(query=...).
+To draft a migration, read migration_context, then check the script with
+validate_migration before the user runs it.
+
+Errors start with a [code] and end with a hint saying what to change. Follow the
+hint rather than retrying the same call unchanged."""
+
+# Every tool only reads, so a client may run any of them without asking first,
+# and repeat a call safely.
+READ_ONLY = ToolAnnotations(
+    readOnlyHint=True, idempotentHint=True, openWorldHint=False
+)
+
+# Parameters shared by the tools that page through tables or take a SELECT.
+NamePattern = Annotated[
+    str | None,
+    Field(
+        description=(
+            "Filter tables by name, case-insensitive. Plain text matches a "
+            "substring ('order'); *, ? and [] make it a glob ('order_*')."
+        )
+    ),
+]
+Limit = Annotated[int, Field(description=f"Tables per page, 1 to {MAX_TABLE_LIMIT}.")]
+Offset = Annotated[
+    int, Field(description="Tables to skip. Pass the previous page's next_offset.")
+]
+SelectSql = Annotated[
+    str,
+    Field(
+        description=(
+            "One SELECT statement (WITH ... SELECT is fine), in the dialect "
+            "explore_schema reports. No comments, no second statement, no "
+            "FOR UPDATE or FOR SHARE."
+        )
+    ),
+]
+
 TOKEN_ENTRIES = token_entries(MCP_AUTH_TOKEN, MCP_AUTH_TOKENS)
 mcp = FastMCP(
     "db-explorer",
+    instructions=INSTRUCTIONS,
     auth=build_auth_provider(
         MCP_TRANSPORT, TOKEN_ENTRIES, MCP_ALLOW_UNAUTHENTICATED
     ),
@@ -256,17 +310,41 @@ def explore_schema_data(
     )
 
 
-@mcp.tool
+@mcp.tool(annotations=READ_ONLY)
 @tool_errors
 def explore_schema(
-    table_name: str | None = None,
-    include_sample_data: bool = False,
-    name_pattern: str | None = None,
-    detail: bool = False,
-    limit: int = DEFAULT_TABLE_LIMIT,
-    offset: int = 0,
+    table_name: Annotated[
+        str | None,
+        Field(
+            description=(
+                "Exact name of one table or view. Returns its columns, keys and "
+                "indexes, plus a row count for a table; the listing parameters "
+                "are ignored."
+            )
+        ),
+    ] = None,
+    include_sample_data: Annotated[
+        bool, Field(description="With table_name, also return 3 sample rows.")
+    ] = False,
+    name_pattern: NamePattern = None,
+    detail: Annotated[
+        bool,
+        Field(
+            description=(
+                "List each table with its columns, keys and indexes instead of "
+                "a column count. Pages get much larger; for one table use "
+                "table_name."
+            )
+        ),
+    ] = False,
+    limit: Limit = DEFAULT_TABLE_LIMIT,
+    offset: Offset = 0,
 ) -> dict[str, Any]:
-    """Explore database tables, columns, keys, indexes, and sample rows.
+    """List the database's tables and views, or describe one in detail.
+
+    Every result names the SQL dialect to write queries in. Table and column
+    comments stored in the database come with table_name or detail=true, not
+    with the default listing.
 
     A listing comes in pages. A page can hold fewer tables than limit when it
     reaches the size cap, so continue with offset=next_offset, never offset+limit.
@@ -285,48 +363,95 @@ def execute_query_data(sql: str, row_limit: int = 100) -> dict[str, Any]:
     return execute_safe(current_engine(), sql, row_limit)
 
 
-@mcp.tool
+@mcp.tool(annotations=READ_ONLY)
 @tool_errors
-def execute_query(sql: str, row_limit: int = 100) -> dict[str, Any]:
-    """Execute one validated, read-only SQL SELECT query."""
+def execute_query(
+    sql: SelectSql,
+    row_limit: Annotated[
+        int,
+        Field(
+            description=(
+                f"Most rows to return, at least 1. Values above {MAX_ROW_LIMIT} "
+                f"are treated as {MAX_ROW_LIMIT}."
+            )
+        ),
+    ] = 100,
+) -> dict[str, Any]:
+    """Run one read-only SELECT and return its rows.
+
+    The result is capped by row_limit and by size. truncated=true means more rows
+    exist: filter with WHERE or aggregate rather than raising row_limit. Repeated
+    column names come back labelled name:1, name:2; alias them in the query.
+    """
     return execute_query_data(sql, row_limit)
 
 
-@mcp.tool
+@mcp.tool(annotations=READ_ONLY)
 @tool_errors
-def explain_query(sql: str) -> dict[str, Any]:
-    """Return the database execution plan for one safe SELECT query."""
+def explain_query(sql: SelectSql) -> dict[str, Any]:
+    """Return the database's execution plan for one SELECT, without running it."""
     return explain_safe(current_engine(), sql)
 
 
-@mcp.tool
+@mcp.tool(annotations=READ_ONLY)
 @tool_errors
 def validate_schema(
-    table_name: str | None = None,
-    name_pattern: str | None = None,
-    limit: int = DEFAULT_TABLE_LIMIT,
-    offset: int = 0,
+    table_name: Annotated[
+        str | None,
+        Field(
+            description=(
+                "One table to check; a view is refused as not found. Omit it to "
+                "check a page of tables."
+            )
+        ),
+    ] = None,
+    name_pattern: NamePattern = None,
+    limit: Limit = DEFAULT_TABLE_LIMIT,
+    offset: Offset = 0,
 ) -> dict[str, Any]:
-    """Check one table, or one page of tables, for schema issues."""
+    """Check tables for missing primary keys, unindexed foreign keys, very wide
+    tables and tables with no indexes. A page of tables leaves views out.
+    """
     return validate_schema_data(current_engine(), table_name, name_pattern, limit, offset)
 
 
-@mcp.tool
+@mcp.tool(annotations=READ_ONLY)
 @tool_errors
 def suggest_index(
-    query: str | None = None,
-    table_name: str | None = None,
+    query: Annotated[
+        str | None,
+        Field(
+            description=(
+                "One SELECT whose plan to check for full table scans, under the "
+                "same rules as execute_query. Pass this or table_name, not both."
+            )
+        ),
+    ] = None,
+    table_name: Annotated[
+        str | None,
+        Field(
+            description=(
+                "A table whose foreign keys to check for a covering index. Pass "
+                "this or query, not both."
+            )
+        ),
+    ] = None,
 ) -> dict[str, Any]:
-    """Suggest indexes from a query plan or table foreign-key metadata."""
+    """Suggest indexes for one table or one query.
+
+    With table_name, returns a CREATE INDEX for each foreign key no index covers.
+    With query, reports the full table scans in its plan, without generated SQL.
+    Nothing is created: the caller decides whether to run a suggestion.
+    """
     return suggest_indexes(current_engine(), query, table_name)
 
 
-@mcp.tool
+@mcp.tool(annotations=READ_ONLY)
 @tool_errors
 def migration_context(
-    name_pattern: str | None = None,
-    limit: int = DEFAULT_TABLE_LIMIT,
-    offset: int = 0,
+    name_pattern: NamePattern = None,
+    limit: Limit = DEFAULT_TABLE_LIMIT,
+    offset: Offset = 0,
 ) -> dict[str, Any]:
     """Return dialect and one page of table detail for client-side migration drafting.
 
@@ -336,9 +461,22 @@ def migration_context(
     return get_migration_context(current_engine(), name_pattern, limit, offset)
 
 
-@mcp.tool
+@mcp.tool(annotations=READ_ONLY)
 @tool_errors
-def validate_migration(up_sql: str, down_sql: str) -> dict[str, Any]:
+def validate_migration(
+    up_sql: Annotated[
+        str,
+        Field(
+            description=(
+                "Statements that apply the change, separated by semicolons, "
+                "with no comments."
+            )
+        ),
+    ],
+    down_sql: Annotated[
+        str, Field(description="Statements that undo up_sql, in the same form.")
+    ],
+) -> dict[str, Any]:
     """Check migration scripts without executing them.
 
     Reports each statement's type and rejects SELECT, comments and unbalanced

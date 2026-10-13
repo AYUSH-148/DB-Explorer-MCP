@@ -22,7 +22,6 @@ def get_migration_context(
         engine, name_pattern=name_pattern, limit=limit, offset=offset, detail=True
     )
     return {
-        "dialect": engine.dialect.name,
         **page,
         "execution_note": "Migration SQL is generated and run by the user, never by this server.",
     }

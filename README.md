@@ -100,7 +100,7 @@ Both modes run identical tool code — only `MCP_TRANSPORT` changes.
 
 | Tool | Arguments | Returns |
 | --- | --- | --- |
-| `explore_schema` | `table_name?`, `include_sample_data=false`, `name_pattern?`, `detail=false`, `limit=200`, `offset=0` | A listing of tables and views (each with a `kind` and column count), or one relation's `kind`, columns, PK, FKs, indexes, row count, and up to 3 sample rows |
+| `explore_schema` | `table_name?`, `include_sample_data=false`, `name_pattern?`, `detail=false`, `limit=200`, `offset=0` | The `dialect` to write SQL in, plus a listing of tables and views (each with a `kind` and column count), or one relation's `kind`, columns, PK, FKs, indexes, row count (tables only), and up to 3 sample rows. One relation, or a page with `detail=true`, also carries any table and column `comment` the database stores |
 | `execute_query` | `sql`, `row_limit=100` (max 1000) | `columns`, `rows`, `count`, `truncated`, and the effective `row_limit` for one validated `SELECT`; plus `duplicate_columns` and a `note` when a result repeats a column name (the repeats are labelled `id:1`, which is not valid SQL), and a `note` when rows were cut to stay under the size budget |
 | `explain_query` | `sql` | Native execution plan plus the resolved `dialect` |
 | `validate_schema` | `table_name?`, `name_pattern?`, `limit=200`, `offset=0` | Schema issues with `severity`, `code`, `message`, `suggestion`; without `table_name`, one page of tables (views skipped), paged like `explore_schema` |
@@ -200,7 +200,7 @@ Requires Python 3.11+ and [uv](https://docs.astral.sh/uv/).
 ```powershell
 uv sync
 uv run python tests/seed_test_db.py   # creates sample.db
-uv run pytest                         # 326 tests on SQLite; 22 more with TEST_*_URL set
+uv run pytest                         # 329 tests on SQLite; 26 more with TEST_*_URL set
 uv run server.py                      # stdio transport
 ```
 
@@ -389,7 +389,7 @@ For OAuth with an identity provider instead, pass one of FastMCP's providers as 
 uv run pytest
 ```
 
-326 tests covering the safety layer, value serialization, read-only enforcement and timeouts, HTTP authentication and token groups, inspector, explain, index suggestions, schema health, migration validation, error reporting, and the tool wrappers. Each uses a temporary SQLite database, so the suite needs no credentials and no running server.
+329 tests covering the safety layer, value serialization, read-only enforcement and timeouts, HTTP authentication and token groups, inspector, explain, index suggestions, schema health, migration validation, error reporting, and the tool wrappers. Each uses a temporary SQLite database, so the suite needs no credentials and no running server.
 
 SQLite cannot produce the types that break a real driver -- it has no `NUMERIC` and returns `str`/`int` for nearly everything -- so [tests/test_serialization.py](tests/test_serialization.py) exercises `Decimal`, `datetime`, `UUID`, and binary values directly rather than through a query. [tests/test_live_databases.py](tests/test_live_databases.py) covers what SQLite cannot: the read-only transaction, the server-side statement timeout, `NUMERIC`/`TIMESTAMP` values, and catalog reflection, against real PostgreSQL and MySQL. Set `TEST_POSTGRES_URL` and/or `TEST_MYSQL_URL` (a throwaway database: the tests create and drop `dbx_live_*` tables) to run it; unset, it is skipped. CI runs both against service containers.
 

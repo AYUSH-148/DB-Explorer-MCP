@@ -61,12 +61,18 @@ class _Page(NamedTuple):
 
 
 def _column_info(column: dict[str, Any]) -> dict[str, Any]:
-    return {
+    info = {
         "name": column["name"],
         "type": str(column["type"]),
         "nullable": column["nullable"],
         "default": jsonable(column.get("default")),
     }
+    # A comment is often the only record of what a column means. Most columns
+    # have none, so the key is left out rather than sent as null on every one.
+    # jsonable cuts an overlong one, as it does a long text value in a row.
+    if column.get("comment"):
+        info["comment"] = jsonable(column["comment"])
+    return info
 
 
 def _matches(table_name: str, pattern: str) -> bool:
@@ -196,7 +202,12 @@ def _reflect(
     """Reflect a set of tables, mapping any that cannot be read to None."""
     if not table_names:
         return {}
-    return _batched(table_names, lambda names: _reflect_batch(inspector, names))
+    reflected = _batched(table_names, lambda names: _reflect_batch(inspector, names))
+    comments = _table_comments(inspector, table_names)
+    for name, table in reflected.items():
+        if table is not None:
+            table["comment"] = comments.get(name)
+    return reflected
 
 
 def _reflect_batch(
@@ -224,14 +235,44 @@ def _reflect_batch(
     }
 
 
+def _table_comments(inspector: Inspector, table_names: Sequence[str]) -> dict[str, str]:
+    """Return the comment of each table that has one.
+
+    Fetched apart from the rest of the reflection because it is optional: a
+    failure here costs the comments only, never a table's columns. It runs in a
+    savepoint, because on Postgres a failed statement would otherwise abort the
+    transaction and fail every query after it.
+    ponytail: MySQL table comments come from SHOW CREATE TABLE, which leaves
+    table options out under sql_mode ANSI, so such a server reports none. Read
+    information_schema.TABLES.TABLE_COMMENT if that matters.
+    """
+    # SQLite has no comments, and its dialect raises NotImplementedError for them.
+    if not inspector.dialect.supports_comments:
+        return {}
+    try:
+        with inspector.bind.begin_nested():
+            found = inspector.get_multi_table_comment(
+                filter_names=list(table_names), kind=ObjectKind.ANY
+            )
+    except (SQLAlchemyError, NotImplementedError):
+        return {}
+    return {
+        name: jsonable(comment["text"])
+        for (_schema, name), comment in found.items()
+        if comment and comment.get("text")
+    }
+
+
 def _table_payload(
     table_name: str, kind: str, reflected: dict[str, Any] | None
 ) -> dict[str, Any]:
     if reflected is None:
         return {"name": table_name, "kind": kind, "error": _UNREADABLE}
+    payload: dict[str, Any] = {"name": table_name, "kind": kind}
+    if reflected["comment"]:
+        payload["comment"] = reflected["comment"]
     return {
-        "name": table_name,
-        "kind": kind,
+        **payload,
         "columns": [_column_info(column) for column in reflected["columns"]],
         "primary_key": reflected["primary_key"].get("constrained_columns", []),
         "foreign_keys": [
@@ -321,6 +362,9 @@ def get_schema_page(
     has_more = page.offset + len(tables) < page.total
 
     result: dict[str, Any] = {
+        # The caller writes the SQL, and LIMIT vs TOP, quoting and date functions
+        # all depend on which database will run it.
+        "dialect": engine.dialect.name,
         "tables": tables,
         "total_matching_tables": page.total,
         "returned": len(tables),
@@ -357,7 +401,10 @@ def get_table_detail(
             raise table_not_found(table_name, list(kinds))
 
         reflected = _reflect(inspector, [table_name])[table_name]
-        details = _table_payload(table_name, kinds[table_name], reflected)
+        details = {
+            "dialect": engine.dialect.name,
+            **_table_payload(table_name, kinds[table_name], reflected),
+        }
         if reflected is None:
             return details
         # No count for a view: it would run the view's whole query and could time
