@@ -29,6 +29,19 @@ def test_get_table_detail_can_include_sample_rows(engine):
     ]
 
 
+def test_a_dialect_without_comment_support_still_returns_the_table(
+    engine, monkeypatch
+):
+    # SQLite raises NotImplementedError for table comments. A dialect that claims
+    # support and then raises must cost the comments only.
+    monkeypatch.setattr(engine.dialect, "supports_comments", True)
+
+    details = get_table_detail(engine, "users")
+
+    assert "comment" not in details
+    assert details["columns"][0]["name"] == "id"
+
+
 def test_get_table_detail_rejects_unknown_table(engine):
     with pytest.raises(ValueError, match="Table not found: missing"):
         get_table_detail(engine, "missing")

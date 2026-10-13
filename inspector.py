@@ -69,8 +69,9 @@ def _column_info(column: dict[str, Any]) -> dict[str, Any]:
     }
     # A comment is often the only record of what a column means. Most columns
     # have none, so the key is left out rather than sent as null on every one.
+    # jsonable cuts an overlong one, as it does a long text value in a row.
     if column.get("comment"):
-        info["comment"] = column["comment"]
+        info["comment"] = jsonable(column["comment"])
     return info
 
 
@@ -201,14 +202,19 @@ def _reflect(
     """Reflect a set of tables, mapping any that cannot be read to None."""
     if not table_names:
         return {}
-    return _batched(table_names, lambda names: _reflect_batch(inspector, names))
+    reflected = _batched(table_names, lambda names: _reflect_batch(inspector, names))
+    comments = _table_comments(inspector, table_names)
+    for name, table in reflected.items():
+        if table is not None:
+            table["comment"] = comments.get(name)
+    return reflected
 
 
 def _reflect_batch(
     inspector: Inspector,
     table_names: Sequence[str],
 ) -> dict[str, dict[str, Any]]:
-    """Reflect a set of tables in five queries rather than five per table.
+    """Reflect a set of tables in four queries rather than four per table.
 
     ObjectKind.ANY includes views; the default kind silently drops them.
     """
@@ -217,15 +223,6 @@ def _reflect_batch(
     primary_keys = inspector.get_multi_pk_constraint(**options)
     foreign_keys = inspector.get_multi_foreign_keys(**options)
     indexes = inspector.get_multi_indexes(**options)
-    # SQLite has no comments, and its dialect raises NotImplementedError for them.
-    # ponytail: MySQL table comments come from SHOW CREATE TABLE, which leaves
-    # table options out under sql_mode ANSI, so such a server reports none. Read
-    # information_schema.TABLES.TABLE_COMMENT if that matters.
-    comments = (
-        inspector.get_multi_table_comment(**options)
-        if inspector.dialect.supports_comments
-        else {}
-    )
 
     return {
         name: {
@@ -233,9 +230,36 @@ def _reflect_batch(
             "primary_key": primary_keys.get((_DEFAULT_SCHEMA, name)) or {},
             "foreign_keys": foreign_keys.get((_DEFAULT_SCHEMA, name), []),
             "indexes": indexes.get((_DEFAULT_SCHEMA, name), []),
-            "comment": (comments.get((_DEFAULT_SCHEMA, name)) or {}).get("text"),
         }
         for name in table_names
+    }
+
+
+def _table_comments(inspector: Inspector, table_names: Sequence[str]) -> dict[str, str]:
+    """Return the comment of each table that has one.
+
+    Fetched apart from the rest of the reflection because it is optional: a
+    failure here costs the comments only, never a table's columns. It runs in a
+    savepoint, because on Postgres a failed statement would otherwise abort the
+    transaction and fail every query after it.
+    ponytail: MySQL table comments come from SHOW CREATE TABLE, which leaves
+    table options out under sql_mode ANSI, so such a server reports none. Read
+    information_schema.TABLES.TABLE_COMMENT if that matters.
+    """
+    # SQLite has no comments, and its dialect raises NotImplementedError for them.
+    if not inspector.dialect.supports_comments:
+        return {}
+    try:
+        with inspector.bind.begin_nested():
+            found = inspector.get_multi_table_comment(
+                filter_names=list(table_names), kind=ObjectKind.ANY
+            )
+    except (SQLAlchemyError, NotImplementedError):
+        return {}
+    return {
+        name: jsonable(comment["text"])
+        for (_schema, name), comment in found.items()
+        if comment and comment.get("text")
     }
 
 

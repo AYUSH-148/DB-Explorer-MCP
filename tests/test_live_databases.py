@@ -16,6 +16,7 @@ import time
 
 import pytest
 from sqlalchemy import create_engine, text
+from sqlalchemy.engine.reflection import Inspector
 from sqlalchemy.exc import DBAPIError
 
 from db import create_configured_engine, read_only_connection
@@ -216,11 +217,31 @@ def test_table_detail_reflects_comments(engine):
 
     assert columns["name"]["comment"] == "Display name"
     # MySQL under sql_mode ANSI hides table comments from reflection; see
-    # _reflect_batch.
-    if engine.dialect.name == "postgresql":
-        assert details["comment"] == "Registered users"
+    # _table_comments. Stock MySQL, as in CI, does not run in that mode.
+    if engine.dialect.name == "mysql":
+        with engine.connect() as connection:
+            sql_mode = connection.exec_driver_sql("SELECT @@sql_mode").scalar_one()
+        if "ANSI" in sql_mode.split(","):
+            return
+    assert details["comment"] == "Registered users"
     # A column without a comment carries no comment key at all.
     assert "comment" not in columns["balance"]
+
+
+def test_a_failed_comment_fetch_costs_only_the_comments(engine, monkeypatch):
+    # A statement that fails the way a refused catalog read would. On Postgres it
+    # aborts the transaction unless it ran in a savepoint, and the row count
+    # queried after it would then fail too.
+    def failing_fetch(self, **_kwargs):
+        self.bind.exec_driver_sql("SELECT * FROM dbx_live_no_such_table")
+
+    monkeypatch.setattr(Inspector, "get_multi_table_comment", failing_fetch)
+
+    details = get_table_detail(engine, "dbx_live_users")
+
+    assert "comment" not in details
+    assert [column["name"] for column in details["columns"]][:2] == ["id", "name"]
+    assert details["row_count"] > 0
 
 
 def test_unindexed_foreign_key_is_reported_where_one_exists(engine):

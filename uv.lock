@@ -331,7 +331,9 @@ version = "0.1.0"
 source = { virtual = "." }
 dependencies = [
     { name = "fastmcp" },
+    { name = "mcp" },
     { name = "psycopg2-binary" },
+    { name = "pydantic" },
     { name = "pymysql" },
     { name = "python-dotenv" },
     { name = "sqlalchemy" },
@@ -346,8 +348,10 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "fastmcp", specifier = ">=2.0.0" },
+    { name = "fastmcp", specifier = ">=3.4.7" },
+    { name = "mcp", specifier = ">=1.29.0" },
     { name = "psycopg2-binary", specifier = ">=2.9.0" },
+    { name = "pydantic", specifier = ">=2.0.0" },
     { name = "pymysql", specifier = ">=1.1.0" },
     { name = "python-dotenv", specifier = ">=1.0.0" },
     { name = "sqlalchemy", specifier = ">=2.0.0" },

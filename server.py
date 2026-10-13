@@ -317,8 +317,9 @@ def explore_schema(
         str | None,
         Field(
             description=(
-                "Exact name of one table or view. Returns its columns, keys, "
-                "indexes and row count; the listing parameters are ignored."
+                "Exact name of one table or view. Returns its columns, keys and "
+                "indexes, plus a row count for a table; the listing parameters "
+                "are ignored."
             )
         ),
     ] = None,
@@ -341,8 +342,9 @@ def explore_schema(
 ) -> dict[str, Any]:
     """List the database's tables and views, or describe one in detail.
 
-    Every result names the SQL dialect to write queries in, and includes any
-    comments the database stores on tables and columns.
+    Every result names the SQL dialect to write queries in. Table and column
+    comments stored in the database come with table_name or detail=true, not
+    with the default listing.
 
     A listing comes in pages. A page can hold fewer tables than limit when it
     reaches the size cap, so continue with offset=next_offset, never offset+limit.
@@ -396,14 +398,19 @@ def explain_query(sql: SelectSql) -> dict[str, Any]:
 def validate_schema(
     table_name: Annotated[
         str | None,
-        Field(description="One table to check. Omit it to check a page of tables."),
+        Field(
+            description=(
+                "One table to check; a view is refused as not found. Omit it to "
+                "check a page of tables."
+            )
+        ),
     ] = None,
     name_pattern: NamePattern = None,
     limit: Limit = DEFAULT_TABLE_LIMIT,
     offset: Offset = 0,
 ) -> dict[str, Any]:
     """Check tables for missing primary keys, unindexed foreign keys, very wide
-    tables and tables with no indexes. Views are skipped.
+    tables and tables with no indexes. A page of tables leaves views out.
     """
     return validate_schema_data(current_engine(), table_name, name_pattern, limit, offset)
 
