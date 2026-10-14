@@ -8,11 +8,12 @@ from typing import Annotated, Any, ParamSpec, TypeVar
 
 import fastmcp
 from fastmcp import FastMCP
-from fastmcp.exceptions import ToolError
+from fastmcp.exceptions import ToolError, ValidationError
 from fastmcp.server.dependencies import get_access_token
 from fastmcp.server.middleware import CallNext, Middleware, MiddlewareContext
 from mcp.types import ToolAnnotations
 from pydantic import Field
+from pydantic import ValidationError as PydanticValidationError
 from sqlalchemy import Engine
 from sqlalchemy.exc import SQLAlchemyError
 from starlette.requests import Request
@@ -66,9 +67,11 @@ INSTRUCTIONS = """\
 Read-only access to one SQL database. Nothing here can change data or schema:
 queries must be a single SELECT, and migration scripts are checked, never run.
 
-Typical flow: explore_schema() to list tables and learn the SQL dialect, then
-explore_schema(table_name=...) for one table's columns and keys, then
-execute_query. For a slow query, use explain_query or suggest_index(query=...).
+Typical flow: explore_schema() lists the tables and the SQL dialect. For the
+columns of every table a question touches, call explore_schema(detail=true)
+once, with name_pattern to narrow it, rather than one table_name call per table.
+Then execute_query. Skip the listing when you already know the table names.
+For a slow query, use explain_query or suggest_index(query=...).
 To draft a migration, read migration_context, then check the script with
 validate_migration before the user runs it.
 
@@ -167,6 +170,13 @@ def current_engine() -> Engine:
     )
 
 
+def _audit_arguments(arguments: dict[str, Any]) -> str:
+    rendered = repr(arguments)
+    if len(rendered) > AUDIT_ARGUMENT_LIMIT:
+        rendered = f"{rendered[:AUDIT_ARGUMENT_LIMIT]}... ({len(rendered)} chars)"
+    return rendered
+
+
 def _caller() -> str:
     token = get_access_token()
     if token is None:
@@ -218,12 +228,7 @@ def tool_errors(
             )
             raise ToolError(unexpected.as_text()) from error
         finally:
-            arguments = repr({**dict(zip(parameter_names, args)), **kwargs})
-            if len(arguments) > AUDIT_ARGUMENT_LIMIT:
-                arguments = (
-                    f"{arguments[:AUDIT_ARGUMENT_LIMIT]}... "
-                    f"({len(arguments)} chars)"
-                )
+            arguments = _audit_arguments({**dict(zip(parameter_names, args)), **kwargs})
             audit_log.info(
                 "%s %s%s %s", function.__name__, outcome, _caller(), arguments
             )
@@ -277,6 +282,48 @@ class ConcurrentCallLimit(Middleware):
             self.running[client] -= 1
 
 
+class ArgumentErrors(Middleware):
+    """Give a call whose arguments don't fit the input schema a [code] and hint.
+
+    FastMCP checks argument names and types before the tool runs, so tool_errors
+    never sees these calls: without this they reach the model as raw pydantic text
+    and leave no audit line.
+    """
+
+    async def on_call_tool(
+        self, context: MiddlewareContext, call_next: CallNext
+    ) -> Any:
+        try:
+            return await call_next(context)
+        except ValidationError as error:
+            cause = error.__cause__
+            problems = (
+                "; ".join(
+                    f"{'.'.join(str(part) for part in problem['loc'])}: {problem['msg']}"
+                    for problem in cause.errors(include_url=False)
+                )
+                if isinstance(cause, PydanticValidationError)
+                else str(error)
+            )
+            name = context.message.name
+            audit_log.info(
+                "%s invalid_argument%s %s",
+                name,
+                _caller(),
+                _audit_arguments(context.message.arguments or {}),
+            )
+            refused = ToolInputError(
+                code="invalid_argument",
+                message=f"The arguments do not match {name}'s input schema: {problems}",
+                hint=(
+                    "Use only the parameter names and types the tool lists, and "
+                    "include every required one; no query was run."
+                ),
+            )
+            raise ToolError(refused.as_text()) from error
+
+
+mcp.add_middleware(ArgumentErrors())
 mcp.add_middleware(ConcurrentCallLimit(MAX_CONCURRENT_CALLS_PER_CLIENT))
 
 
@@ -332,8 +379,9 @@ def explore_schema(
         Field(
             description=(
                 "List each table with its columns, keys and indexes instead of "
-                "a column count. Pages get much larger; for one table use "
-                "table_name."
+                "a column count. Use this, not one table_name call per table, "
+                "when a question touches several tables. Pages get larger, so "
+                "narrow a big schema with name_pattern."
             )
         ),
     ] = False,
@@ -344,7 +392,8 @@ def explore_schema(
 
     Every result names the SQL dialect to write queries in. Table and column
     comments stored in the database come with table_name or detail=true, not
-    with the default listing.
+    with the default listing. CHECK constraints, triggers and view definitions
+    are never included, so their absence here says nothing about the database.
 
     A listing comes in pages. A page can hold fewer tables than limit when it
     reaches the size cap, so continue with offset=next_offset, never offset+limit.

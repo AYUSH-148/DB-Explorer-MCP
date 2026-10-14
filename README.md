@@ -184,7 +184,7 @@ Hint: Add a WHERE clause, aggregate instead of scanning, or query a smaller tabl
 | `query_too_complex` | The SQL is over 50,000 characters, or past what `sqlparse` will parse: about 10,000 tokens in one list (an `IN (...)` of roughly 3,000 values) or 100 levels of nesting. Applies to `validate_migration` scripts too |
 | `too_many_concurrent_calls` | The caller's token already has `MAX_CONCURRENT_CALLS_PER_CLIENT` calls running. Refused before any query runs, so one token cannot hold every pooled connection |
 | `unknown_group` | The caller's token names a group the server has no database login for. Only an auth provider other than `MCP_AUTH_TOKENS` can produce one |
-| `invalid_argument` | An argument out of range, such as `row_limit` below 1 |
+| `invalid_argument` | An argument out of range, such as `row_limit` below 1, or arguments that don't fit the tool's input schema: a missing required one, a wrong type, an unknown name |
 | `missing_argument` / `conflicting_arguments` | `suggest_index` needs exactly one of `query` or `table_name` |
 | `comments_not_allowed` / `unparsable_sql` / `select_in_migration` | `validate_migration` rejected a script |
 | `internal_error` | A bug in the server. The traceback goes to the server log; the caller sees only the code |
@@ -200,7 +200,7 @@ Requires Python 3.11+ and [uv](https://docs.astral.sh/uv/).
 ```powershell
 uv sync
 uv run python tests/seed_test_db.py   # creates sample.db
-uv run pytest                         # 329 tests on SQLite; 26 more with TEST_*_URL set
+uv run pytest                         # 336 tests on SQLite; 26 more with TEST_*_URL set
 uv run server.py                      # stdio transport
 ```
 
@@ -389,9 +389,21 @@ For OAuth with an identity provider instead, pass one of FastMCP's providers as 
 uv run pytest
 ```
 
-329 tests covering the safety layer, value serialization, read-only enforcement and timeouts, HTTP authentication and token groups, inspector, explain, index suggestions, schema health, migration validation, error reporting, and the tool wrappers. Each uses a temporary SQLite database, so the suite needs no credentials and no running server.
+336 tests covering the safety layer, value serialization, read-only enforcement and timeouts, HTTP authentication and token groups, inspector, explain, index suggestions, schema health, migration validation, error reporting, and the tool wrappers. Each uses a temporary SQLite database, so the suite needs no credentials and no running server.
 
 SQLite cannot produce the types that break a real driver -- it has no `NUMERIC` and returns `str`/`int` for nearly everything -- so [tests/test_serialization.py](tests/test_serialization.py) exercises `Decimal`, `datetime`, `UUID`, and binary values directly rather than through a query. [tests/test_live_databases.py](tests/test_live_databases.py) covers what SQLite cannot: the read-only transaction, the server-side statement timeout, `NUMERIC`/`TIMESTAMP` values, and catalog reflection, against real PostgreSQL and MySQL. Set `TEST_POSTGRES_URL` and/or `TEST_MYSQL_URL` (a throwaway database: the tests create and drop `dbx_live_*` tables) to run it; unset, it is skipped. CI runs both against service containers.
+
+## Agent evals
+
+The tests check each tool; the evals check whether a model uses the tools well. [evals/run.py](evals/run.py) runs each task in [evals/scenarios.py](evals/scenarios.py) through Claude Code in headless mode (`claude -p`), with this server, pointed at a seeded `evals/eval.db`, as its only MCP server and no built-in tools. It runs from an empty directory with no settings sources, so your own hooks, `CLAUDE.md` and other MCP servers stay out of it. Every tool call's arguments, result, error code and latency are recorded from the stream, along with token usage. Each run is scored on whether it called the expected tools and avoided forbidden ones, stayed within its call budget, and put the right answer (read from the database) in its reply; a second `claude -p` call with no tools then grades the whole trajectory from 1 to 5.
+
+```powershell
+uv run python evals/seed_eval_db.py      # build evals/eval.db (the runner does this if it is missing)
+uv run python evals/run.py               # every scenario, on Sonnet
+uv run python evals/run.py --only top_customers --model opus
+```
+
+It needs the `claude` CLI on `PATH`, logged in. Runs use that login's subscription and count toward its usage limits; no API key is involved. The report's `api_equivalent_usd` is what a run would have cost on the API. A model's choices vary between runs, so the evals are not part of CI. Reports are written to `evals/results/`.
 
 ## Project layout
 
@@ -410,6 +422,7 @@ migration.py      migration context and non-executing script validation
 errors.py         coded errors with hints, and driver-error classification
 config.py         environment configuration with fail-fast checks
 tests/            pytest suite over temporary SQLite databases
+evals/            agent evals: a Claude model works scripted tasks through the tools
 ```
 
 ## Design notes and limits
