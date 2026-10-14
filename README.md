@@ -1,7 +1,7 @@
 # DB Explorer MCP
 
+[![CI](https://github.com/AYUSH-148/DB-Explorer-MCP/actions/workflows/ci.yml/badge.svg)](https://github.com/AYUSH-148/DB-Explorer-MCP/actions/workflows/ci.yml)
 [![M8ven Score](https://m8ven.ai/badge/mcp/ayush-148-db-explorer-mcp-1x2fhb)](https://m8ven.ai/mcp/ayush-148-db-explorer-mcp-1x2fhb)
-
 
 A [Model Context Protocol](https://modelcontextprotocol.io) server that lets an AI coding assistant explore, query, and audit a relational database **without ever being able to write to it**.
 
@@ -13,6 +13,8 @@ MCP client LLM  ->  FastMCP tools  ->  safety layer  ->  SQLAlchemy  ->  databas
 ```
 
 The server makes no LLM API calls of its own, so there is **no API key to configure** — reasoning happens in whichever client you connect. Works with SQLite, PostgreSQL, and MySQL through SQLAlchemy.
+
+**Tested and evaluated.** 336 tests run on every push and pull request, plus 26 more against real PostgreSQL and MySQL in CI ([Tests](#tests)). In an agent evaluation, Claude completed **14 of 14** realistic database tasks through these tools with **no failed tool calls**, an average of 2 calls per task, and a mean independent judge score of **4.6 / 5** ([Agent evals](#agent-evals)).
 
 ## Why
 
@@ -26,7 +28,7 @@ Giving an assistant raw database credentials means one confused or prompt-inject
 │  owns the LLM: reads schema, authors SQL, interprets results │
 └───────────────────────────┬──────────────────────────────────┘
                             │  MCP  ·  stdio (local)
-                            │        ·  streamable HTTP + OAuth 2.0 (remote)
+                            │        ·  streamable HTTP + bearer token (remote)
 ┌───────────────────────────▼──────────────────────────────────┐
 │ server.py  —  FastMCP instance + one engine per token group  │
 │                                                              │
@@ -47,52 +49,18 @@ Giving an assistant raw database credentials means one confused or prompt-inject
 └──────┬────────────┘  └───────┬─────────┘  └─────────────────┘
        │                       │
        └───────────┬───────────┘
-                   │  SQLAlchemy Core (text() + inspect())
+                   │  SQLAlchemy Core
 ┌──────────────────▼───────────────────────────────────────────┐
 │  Target database   ·   PostgreSQL  /  MySQL  /  SQLite       │
 └──────────────────────────────────────────────────────────────┘
 ```
 
-**The LLM lives in the client, not the server.** Most NL-to-SQL designs put a model call inside the server; this one does not. The client already has a capable model, so the server ships zero LLM dependencies, zero API keys, and zero per-call inference cost — and stays usable from any MCP client, not just Claude.
+The SQL arriving at [safety.py](safety.py) is written by the client's model and therefore untrusted, so it is parsed rather than pattern-matched, and a rejected query never reaches the database.
 
-That split defines the trust boundary: the SQL arriving at [safety.py](safety.py) is model-authored and therefore untrusted, so it is parsed rather than pattern-matched, and a rejected query never reaches the driver.
-
-### Request lifecycle
-
-A typical `execute_query` call:
-
-1. **Client** turns the user's question into SQL, using schema it fetched earlier via `explore_schema`.
-2. **FastMCP** deserializes the tool call and validates arguments against the tool's type hints.
-3. **safety.py** parses the SQL with `sqlparse` — one statement, type `SELECT`, no comments, no blocked keywords. Failure raises before any connection is opened.
-4. **Row cap** applied: the query is always wrapped in `SELECT * FROM (…) AS limited_query LIMIT row_limit + 1`.
-5. **SQLAlchemy** executes it on a pooled connection and the rows are serialized to plain dicts. The probe row, if present, is dropped and sets `truncated`.
-6. **Client** receives `{columns, rows, count, truncated, row_limit}` as structured JSON and explains it in natural language.
-
-Errors travel the same path in reverse: a raised `ValueError` becomes an MCP tool error, which the client surfaces to the user while the server keeps serving.
-
-### Module responsibilities
-
-| Module | Role |
-| --- | --- |
-| [server.py](server.py) | Tool surface only — thin `@mcp.tool` wrappers over plain functions, plus transport selection |
-| [safety.py](safety.py) | The trust boundary: AST validation and row-limited execution |
-| [inspector.py](inspector.py) | Reflection via SQLAlchemy `inspect()` — columns, PK, FKs, indexes, row counts, samples |
-| [explain.py](explain.py) | Dialect-aware plans (`EXPLAIN QUERY PLAN` on SQLite, `EXPLAIN` elsewhere) |
-| [index_suggest.py](index_suggest.py) | Recommendations from a live plan or from FK metadata |
-| [schema_health.py](schema_health.py) | Objective schema audit, no heuristics about naming or style |
-| [indexes.py](indexes.py) | Which columns a table already has indexed, including the implicit indexes behind PRIMARY KEY and UNIQUE |
-| [migration.py](migration.py) | Schema context out, script validation in — never executes DDL |
-| [errors.py](errors.py) | Coded, hinted errors and driver-error classification |
-| [config.py](config.py) | Environment resolution with fail-fast checks |
-
-Each tool body delegates to a module-level function that takes an `Engine` argument, so the whole system is testable against a temporary SQLite database with no MCP client and no network involved.
-
-### Transports
-
-| Mode | Transport | Auth | Use |
-| --- | --- | --- | --- |
-| Local | stdio | process-level | development; client spawns the server |
-| Remote | streamable HTTP | OAuth 2.0 (DCR + PKCE) at the platform edge | shared deployment; many clients, one database |
+| Mode | Transport | Auth |
+| --- | --- | --- |
+| Local | stdio | none needed; the client spawns the server |
+| Remote | streamable HTTP | bearer tokens, or OAuth at the platform edge on Prefect Horizon |
 
 Both modes run identical tool code — only `MCP_TRANSPORT` changes.
 
@@ -108,18 +76,9 @@ Both modes run identical tool code — only `MCP_TRANSPORT` changes.
 | `migration_context` | `name_pattern?`, `limit=200`, `offset=0` | Dialect plus one page of columns, keys, and indexes (no row counts), for client-side migration drafting; pages like `explore_schema` |
 | `validate_migration` | `up_sql`, `down_sql` | Parsed statement types per script; rejects `SELECT`, comments and unbalanced parentheses. Not a syntax check, and **never executed** |
 
-`validate_schema` reports four codes: `missing_primary_key`, `unindexed_foreign_key`, `wide_table` (50+ columns), and `no_indexes`. A foreign key counts as indexed when any index, the primary key, or a unique constraint starts with its columns in order, so a one-to-one child keyed on its parent's id is not reported, and no `CREATE INDEX` is suggested that would duplicate an index the database already built. An index that cannot look rows up by value does not count: a partial index (`WHERE ...`), a PostgreSQL GIN, GiST or BRIN index, or a MySQL `FULLTEXT`/`SPATIAL` key. Suggested `CREATE INDEX` statements quote their names, so they run as written against a table called `order` or a PostgreSQL column called `"UserId"`. On MySQL the quotes are backticks, whatever the server's `sql_mode`, because a suggestion is pasted into another session and double quotes only name an identifier where `ANSI_QUOTES` is on.
+`validate_schema` reports four codes: `missing_primary_key`, `unindexed_foreign_key`, `wide_table` (50+ columns), and `no_indexes`. A foreign key counts as indexed when any index, the primary key, or a unique constraint starts with its columns; partial, GIN/GiST/BRIN and FULLTEXT/SPATIAL indexes do not count.
 
-`explore_schema` is cheap by default and expensive only on request. With no arguments it
-returns table names and column counts — a handful of queries however wide the database
-is, and small enough to read before picking a table. Row counts cost a scan, so they
-arrive only with `table_name`, never for a view (its count would run the view's whole
-query), and stop at 100,000 rows: past that, `row_count` is 100000 and
-`row_count_capped` is `true`, so a huge table never times out the call.
-Narrow a large schema with `name_pattern` (`order` matches any name containing it, `order_*` is a glob), page with `limit`/`offset` (capped
-at 1000), and use `detail=true` to expand a whole page into columns, keys, and indexes.
-Views and materialized views are listed alongside tables, since `execute_query` can read
-them too; each entry's `kind` is `table`, `view`, or `materialized_view`. A view whose base table was dropped cannot be read; it is listed with an `error` instead of failing the whole call.
+`explore_schema` is cheap by default: with no arguments it returns table names and column counts. Row counts arrive only with `table_name` (tables only, capped at 100,000 with `row_count_capped: true`). Narrow a large schema with `name_pattern` (`order` matches any name containing it, `order_*` is a glob), page with `limit`/`offset`, and use `detail=true` for the columns, keys and indexes of a whole page in one call. Views and materialized views are listed alongside tables, each with a `kind`.
 
 ## Safety model
 
@@ -127,19 +86,15 @@ Every `execute_query`, `explain_query`, and `suggest_index` call routes through 
 
 - **Single statement.** `SELECT 1; DROP TABLE users` → `Exactly one SQL statement is required`
 - **`SELECT` only**, determined from the parsed statement type rather than a string prefix → `Only SELECT queries are allowed. Got: DELETE`
-- **No SQL comments.** `--`, `/*`, `*/` are refused outright (outside string literals, quoted names and `[bracket]` names, so `'a--b'` still passes), closing the classic comment-smuggling route. `#` is refused too, but only on MySQL and MariaDB, where it starts a comment; elsewhere it is legal SQL (`#>>` on PostgreSQL, `#temp` on SQL Server)
-- **No blocked keywords** anywhere in the token stream: `ALTER`, `CREATE`, `DELETE`, `DROP`, `EXEC`, `EXECUTE`, `GRANT`, `INSERT`, `INTO`, `REVOKE`, `TRUNCATE`, `UPDATE`
-- **No locking clause.** `FOR UPDATE`, `FOR NO KEY UPDATE`, `FOR SHARE`, `FOR KEY SHARE` and MySQL's `LOCK IN SHARE MODE` are refused, because a locking read is not a read: it blocks other transactions from writing those rows. This one is defense in depth rather than a hole being closed — PostgreSQL 16 refuses both forms itself inside a read-only transaction (`cannot execute SELECT FOR SHARE in a read-only transaction`, verified). What the check adds is a rejection before a connection is opened, an error naming the clause and the fix instead of a generic driver message, and consistency: `FOR UPDATE` used to be refused only incidentally, because `UPDATE` is on the denylist for data-modifying CTEs.
+- **No SQL comments.** `--`, `/*`, `*/` are refused outside string literals and quoted names, closing the comment-smuggling route. `#` is refused on MySQL and MariaDB only, where it starts a comment.
+- **No blocked keywords** anywhere in the token stream: `ALTER`, `CREATE`, `DELETE`, `DROP`, `EXEC`, `EXECUTE`, `GRANT`, `INSERT`, `INTO`, `REVOKE`, `TRUNCATE`, `UPDATE`. Matched as whole tokens, so `SELECT grant_date FROM permissions` passes. Four entries are load-bearing: `INSERT`, `UPDATE` and `DELETE` can hide in a PostgreSQL data-modifying CTE whose statement type is still `SELECT`, and `SELECT * INTO archive FROM users` creates a table. The rest cannot appear in a `SELECT`-typed statement and stay as a second line of defense if `sqlparse` type detection regresses.
+- **No locking clause.** `FOR UPDATE`, `FOR NO KEY UPDATE`, `FOR SHARE`, `FOR KEY SHARE` and MySQL's `LOCK IN SHARE MODE` are refused, because a locking read blocks other writers. Matched as a clause, not a keyword, so a column named `share` still works.
 
-  This is matched as a **clause**, not as a keyword, and the distinction is the point. `SHARE` alone is a legal column name — `sqlparse` types the `share` in `SELECT share FROM cap_table` as a `Keyword` — so adding `SHARE` to the denylist above would reject a real query. A flat set of words is the wrong shape for a rule about multi-word clauses, so [safety.py](safety.py) collects the keyword sequence and matches `FOR [NO] [KEY] UPDATE|SHARE` against it. A `FOR` belonging to something else (`FOR XML`, `FOR JSON`, `FOR SYSTEM_TIME`) falls through, because its target is not a lock strength.
-
-Every query that passes is wrapped as `SELECT * FROM (<your query>) AS limited_query LIMIT <row_limit>`, so an unbounded scan cannot flood the client's context. The wrap is unconditional: a `LIMIT` in your own query narrows the inner result, but `row_limit` still caps what comes back, so `LIMIT 500` with the default `row_limit` returns 100 rows. `row_limit` is itself clamped to 1000, so raising it cannot defeat the guard. Your query sits on its own line between the parentheses, so a comment the database sees but the validator did not (the two disagree about where a string ends after a backslash-quote) stops at the line break instead of swallowing the closing paren and the `LIMIT`.
-
-The cap is never silent. The wrapper actually asks for `row_limit + 1` rows; if the extra one comes back it is dropped and the result carries `"truncated": true`, so the client can tell "that is all the data" from "there is more" instead of reporting a capped set as complete. The result also returns the effective `row_limit`, which shows when a request above 1000 was clamped.
+Every query that passes is wrapped as `SELECT * FROM (<your query>) AS limited_query LIMIT <row_limit + 1>`, so an unbounded scan cannot flood the client's context. A `LIMIT` in your own query narrows the inner result, but `row_limit` (clamped to 1000) still caps what comes back. If the extra probe row comes back it is dropped and the result carries `"truncated": true`, so a capped result is never mistaken for a complete one.
 
 Validation is only the first of three layers, because a keyword blocklist cannot see a query that is syntactically fine and still harmful:
 
-- **A statement timeout.** `SELECT pg_sleep(600)` passes every check above, so time is bounded independently of syntax: `statement_timeout` on PostgreSQL (set with `SET LOCAL` in each transaction rather than at connect, so it works behind PgBouncer and the Supabase and Neon poolers, which refuse an `options` startup parameter), `max_execution_time` on MySQL, and a progress-handler deadline on SQLite. Configured by `QUERY_TIMEOUT_SECONDS`, applied in [db.py](db.py).
+- **A statement timeout.** `SELECT pg_sleep(600)` passes every check above, so time is bounded independently of syntax: `statement_timeout` on PostgreSQL (set per transaction, so it works behind PgBouncer, Supabase and Neon poolers), `max_execution_time` on MySQL, and a progress-handler deadline on SQLite. Configured by `QUERY_TIMEOUT_SECONDS`, applied in [db.py](db.py).
 - **A read-only transaction.** Reads run through `BEGIN READ ONLY` on PostgreSQL, `START TRANSACTION READ ONLY` on MySQL, and `PRAGMA query_only` on SQLite. The database refuses the write itself, which is a guarantee the blocklist cannot make.
 - **Privileges.** Still the outermost boundary — see [.env.example](.env.example). A `SELECT`-only user is what stops server-side file reads like `pg_read_file()` that no keyword check reliably catches.
 
@@ -153,11 +108,9 @@ Validation is only the first of three layers, because a keyword blocklist cannot
   GRANT SELECT (id, name, created_at) ON users TO explorer;
   ```
 
-  MySQL takes the same column list: `GRANT SELECT (id, name) ON app.users TO 'explorer'@'%';`. A query that touches a revoked column then fails with `sql_error` (`permission denied`). On PostgreSQL, `explore_schema` still lists tables the user cannot read, because reflection reads the catalog, not the data.
+  MySQL takes the same column list: `GRANT SELECT (id, name) ON app.users TO 'explorer'@'%';`. A query that touches a revoked column then fails with `sql_error` (`permission denied`).
 
-Every tool call is logged on the `db_explorer.audit` logger, one line each, to stderr: the tool name, how it ended (`ok`, with `rows` and `truncated` for `execute_query`, or the error code such as `unsafe_query`, `sql_error` or `query_timeout`), and its arguments, capped at 2000 characters. Refused, denied and timed-out calls are logged too. The logger is set up when `server.py` is imported, so a hosted entrypoint (`server.py:mcp`) logs the same as `uv run server.py`. Arguments are logged verbatim, so literals in a `WHERE` clause land in the log; treat the log as being as sensitive as the data. A call made over HTTP with a token also records who made it, as `user=<token name> group=<group or ->`, between the outcome and the arguments.
-
-`validate_migration` is deliberately the inverse: it rejects `SELECT` statements, and it never runs either script. You get the parsed statement types back and run the DDL yourself.
+Every tool call writes one line to the `db_explorer.audit` logger on stderr: the tool, how it ended (`ok` or the error code), the caller (`user=<token name> group=<group>` over HTTP), and its arguments, capped at 2000 characters. Arguments are logged verbatim, so treat the log as being as sensitive as the data.
 
 ## Errors
 
@@ -178,20 +131,16 @@ Hint: Add a WHERE clause, aggregate instead of scanning, or query a smaller tabl
 | --- | --- |
 | `table_not_found` | No such table. Carries the nearest matching names the database does have |
 | `sql_error` | The database rejected the query — a missing column, a type mismatch, bad syntax |
-| `query_timeout` | The statement hit `QUERY_TIMEOUT_SECONDS` and was cancelled, including a MySQL client-side read timeout (a backstop at twice the limit), or a call that runs many statements spent that budget in total |
-| `database_unavailable` | The server could not reach the database, or the link dropped mid-query. The driver's text names the host and user, so it goes to the server log and not to the caller |
+| `query_timeout` | The query ran past `QUERY_TIMEOUT_SECONDS` and was cancelled |
+| `database_unavailable` | The server could not reach the database, or the link dropped mid-query. Details go to the server log only |
 | `unsafe_query` | Blocked by [safety.py](safety.py). The hint names the specific rule that fired |
-| `query_too_complex` | The SQL is over 50,000 characters, or past what `sqlparse` will parse: about 10,000 tokens in one list (an `IN (...)` of roughly 3,000 values) or 100 levels of nesting. Applies to `validate_migration` scripts too |
-| `too_many_concurrent_calls` | The caller's token already has `MAX_CONCURRENT_CALLS_PER_CLIENT` calls running. Refused before any query runs, so one token cannot hold every pooled connection |
-| `unknown_group` | The caller's token names a group the server has no database login for. Only an auth provider other than `MCP_AUTH_TOKENS` can produce one |
-| `invalid_argument` | An argument out of range, such as `row_limit` below 1 |
+| `query_too_complex` | The SQL is over 50,000 characters, or too long or deeply nested for the parser (e.g. an `IN (...)` of about 3,000 values) |
+| `too_many_concurrent_calls` | The caller's token already has `MAX_CONCURRENT_CALLS_PER_CLIENT` calls running |
+| `unknown_group` | The caller's token names a group the server has no database login for |
+| `invalid_argument` | An argument out of range, such as `row_limit` below 1, or arguments that don't fit the tool's input schema: a missing required one, a wrong type, an unknown name |
 | `missing_argument` / `conflicting_arguments` | `suggest_index` needs exactly one of `query` or `table_name` |
 | `comments_not_allowed` / `unparsable_sql` / `select_in_migration` | `validate_migration` rejected a script |
 | `internal_error` | A bug in the server. The traceback goes to the server log; the caller sees only the code |
-
-Two details worth knowing. Errors are raised as FastMCP `ToolError`, which is the only error type that survives a server configured with `mask_error_details=True` — reasonable hardening for an HTTP deployment, and it would otherwise reduce every message above to `Error calling tool`. And `sql_error` reports the query *you* sent, not the row-limit wrapper [safety.py](safety.py) builds around it, so the SQL in the message is SQL you can act on.
-
-Internally these stay Python exceptions. [errors.py](errors.py) defines `ToolInputError`, a `ValueError` subclass whose `str()` is the plain message, so composition between modules and direct Python use both keep working; conversion happens only at the tool boundary in [server.py](server.py).
 
 ## Quickstart
 
@@ -200,7 +149,7 @@ Requires Python 3.11+ and [uv](https://docs.astral.sh/uv/).
 ```powershell
 uv sync
 uv run python tests/seed_test_db.py   # creates sample.db
-uv run pytest                         # 329 tests on SQLite; 26 more with TEST_*_URL set
+uv run pytest                         # 336 tests on SQLite; 26 more with TEST_*_URL set
 uv run server.py                      # stdio transport
 ```
 
@@ -327,17 +276,15 @@ To watch the guardrails work, ask it to run `DELETE FROM users`. The call fails 
 | `DB_POOL_SIZE` | `5` | Connections kept open to the database |
 | `DB_MAX_OVERFLOW` | `10` | Extra connections opened under load, closed when returned |
 | `DB_POOL_TIMEOUT_SECONDS` | `5` | How long a call waits for a free connection before failing with `server_busy` |
-| `MAX_CONCURRENT_CALLS_PER_CLIENT` | `5` | Tool calls one token can have running at once; one more fails with `too_many_concurrent_calls`. Counted per server process, so N replicas allow N times this. Calls without a token (stdio, `MCP_ALLOW_UNAUTHENTICATED`) are not limited |
+| `MAX_CONCURRENT_CALLS_PER_CLIENT` | `5` | Tool calls one token can have running at once (per server process); stdio is not limited |
 | `MCP_AUTH_TOKEN` | — | One shared token. This or `MCP_AUTH_TOKENS` is **required** when serving over HTTP, including a host that loads `server.py:mcp` itself. Minimum 32 characters |
 | `MCP_AUTH_TOKENS` | — | Named tokens, `name:token` or `name:group:token`, comma-separated. Use instead of `MCP_AUTH_TOKEN`, not with it. See [Named tokens and groups](#named-tokens-and-groups) |
 | `DATABASE_URL_<GROUP>` | — | The database URL for one token group, for example `DATABASE_URL_ANALYST`. **Required** for every group `MCP_AUTH_TOKENS` names |
 | `MCP_ALLOW_UNAUTHENTICATED` | `false` | Explicit opt-out of the token requirement, for trusted networks or a host whose own authentication sits in front (Horizon) |
 
-Tool calls run on up to 40 worker threads, but the pool allows at most `DB_POOL_SIZE + DB_MAX_OVERFLOW` (15 by default) at once. A call past that waits `DB_POOL_TIMEOUT_SECONDS`, then fails with `server_busy` so the client can retry. Raise the pool toward 40 for heavier HTTP traffic, but keep it under the database's connection limit (`max_connections`), counted across every server instance.
+At most `DB_POOL_SIZE + DB_MAX_OVERFLOW` (15 by default) calls hold a connection at once; a call past that waits `DB_POOL_TIMEOUT_SECONDS`, then fails with `server_busy`. Keep the pool under the database's `max_connections`, counted across every server instance.
 
-The sqlite fallback exists for local development only. It points at `sample.db` next to [config.py](config.py), not in the working directory, because an MCP client picks that directory and SQLite would otherwise create an empty database there and report no tables. It is opened with `mode=ro`, so the operating system refuses writes and a missing file is an error rather than a new empty one. The seed scripts write to the same place wherever they are run from. [config.py](config.py) raises `RuntimeError: DATABASE_URL must be set when serving over HTTP` rather than silently serving an empty local file from a deployment — a failure mode that otherwise surfaces much later as a confusing `unable to open database file`.
-
-`.env` is loaded at startup by [config.py](config.py), so copying `.env.example` to `.env` works as that file instructs. The file next to `config.py` is read first and a `.env` in the working directory second, because an MCP client launches this server with a working directory you do not control. Real environment variables always win over both, so a host's secret store overrides the file without editing it. `.env` stays gitignored.
+The SQLite fallback is for local development only: `sample.db` next to [config.py](config.py), opened read-only. `.env` is loaded at startup (the file next to `config.py` first, then one in the working directory); real environment variables win over both.
 
 ## Serve over HTTP
 
@@ -352,13 +299,9 @@ uv run server.py
 
 An HTTP endpoint publishes SELECT on the configured database to anyone who can reach the port, so the server **fails to start** without `MCP_AUTH_TOKEN` or `MCP_AUTH_TOKENS` rather than coming up unprotected. Clients send a token as `Authorization: Bearer <token>`; it is compared in constant time in [auth.py](auth.py). Set `MCP_ALLOW_UNAUTHENTICATED=true` to override on a genuinely trusted network — the server then warns on stderr at every startup.
 
-A host that loads `server.py:mcp` directly (Horizon, `fastmcp run server.py:mcp --transport http`) never sets `MCP_TRANSPORT`, so the server cannot tell at import that it will serve HTTP. It does not start unprotected: without a token or `MCP_ALLOW_UNAUTHENTICATED=true` every HTTP request is answered `401`. stdio ignores the provider, so local use needs neither.
+A host that loads `server.py:mcp` directly (Horizon, `fastmcp run`) answers every HTTP request `401` unless a token or `MCP_ALLOW_UNAUTHENTICATED=true` is set.
 
-Host and Origin headers are checked on a server bound to a loopback address, so a web page you visit cannot reach a local server through DNS rebinding (`421` for a foreign `Host`, `403` for a foreign `Origin`). FastMCP ships this check off; [server.py](server.py) turns it on unless `FASTMCP_HTTP_HOST_ORIGIN_PROTECTION` is set.
-
-The streamable-http transport runs stateless: it issues no `mcp-session-id`, so any replica behind a load balancer can answer any request, and a restart drops no client. The bearer token is still checked on every request. Set `FASTMCP_STATELESS_HTTP=false` to get sessions back; SSE always keeps them.
-
-`GET /health` answers `{"status": "ok"}` without a token, for load-balancer and platform probes. It reports only that the process is up: it never touches the database, so a database outage does not restart every replica at once.
+On a loopback bind, foreign `Host` and `Origin` headers are refused, so a web page cannot reach a local server through DNS rebinding. The transport is stateless, so any replica behind a load balancer can answer any request. `GET /health` answers `{"status": "ok"}` without a token, for load-balancer probes; it never touches the database.
 
 ### Named tokens and groups
 
@@ -371,15 +314,11 @@ DATABASE_URL_ANALYST=postgresql+psycopg2://dbx_analyst:...@db/app
 DATABASE_URL_FINANCE=postgresql+psycopg2://dbx_finance:...@db/app
 ```
 
-Each entry is `name:token` or `name:group:token`. Names may use letters, digits, `_`, `.`, `@` and `-`; groups use lowercase letters, digits and `_`, because a group names its `DATABASE_URL_<GROUP>` variable. A matched token's name goes into every audit line. Its group picks the engine the call runs on, so the database's own grants, and on PostgreSQL its row-level security policies, decide what that caller can read. The server does not filter tables itself. A lone `MCP_AUTH_TOKEN` behaves as one token named `default` with no group.
+Each entry is `name:token` or `name:group:token`. A token's name goes into every audit line; its group picks the database login the call runs on, so the database's own grants (and PostgreSQL row-level security) decide what that caller can read. A lone `MCP_AUTH_TOKEN` behaves as one token named `default` with no group.
 
-The server refuses to start on a malformed entry, a repeated name or token, a token under 32 characters, a group with no `DATABASE_URL_<GROUP>`, or both `MCP_AUTH_TOKEN` and `MCP_AUTH_TOKENS` set. Its errors name the entry by position, never by its contents, so a token cannot leak into a deploy log. Every token is compared in constant time against every entry, so response timing reveals neither a token nor which entry it matched. Tokens and groups are read at startup: restart the server after changing them.
+The server refuses to start on a malformed entry, a repeated name or token, a token under 32 characters, a group with no `DATABASE_URL_<GROUP>`, or both `MCP_AUTH_TOKEN` and `MCP_AUTH_TOKENS` set. Tokens are compared in constant time and read at startup: restart after changing them. Each group has its own connection pool.
 
-Each group has its own connection pool, so the server can hold up to `DB_POOL_SIZE + DB_MAX_OVERFLOW` connections per group plus the default. Lower both when there are many groups.
-
-On PostgreSQL, every user can read the system catalog, so `explore_schema` lists a table a group cannot `SELECT`. Its rows stay protected: asking for its detail or querying it fails with `permission denied`. To hide the name as well, move the table to a schema the group has no `USAGE` on. MySQL lists only tables the user has a privilege on. [DEPLOYMENT.md](DEPLOYMENT.md) has the `GRANT` statements for both, and a VM setup with HTTPS.
-
-For OAuth with an identity provider instead, pass one of FastMCP's providers as `auth=` in [server.py](server.py). Its callers use `DATABASE_URL`. The group lookup reads `claims["group"]` from the verified token, but engines exist only for the groups named in `MCP_AUTH_TOKENS`, so a provider's token carrying any other group is refused with `unknown_group` rather than run on the default login. Groups from a provider need those engines built from its own configuration. On Prefect Horizon, OAuth with dynamic client registration and PKCE is handled by the platform; see [DEPLOYMENT.md](DEPLOYMENT.md).
+On PostgreSQL, `explore_schema` lists tables a group cannot `SELECT` (the catalog is readable by everyone), but their rows stay protected. [DEPLOYMENT.md](DEPLOYMENT.md) has the `GRANT` statements for both databases, OAuth on Horizon, and a VM setup with HTTPS.
 
 **Hosted Supabase note:** direct connections (`db.<ref>.supabase.co`) are IPv6-only, which fails from IPv4-only containers with an empty-looking `psycopg2.OperationalError`. Use the pooler host from the dashboard's *Connect* panel, and note that the username becomes `postgres.<project-ref>`.
 
@@ -389,9 +328,48 @@ For OAuth with an identity provider instead, pass one of FastMCP's providers as 
 uv run pytest
 ```
 
-329 tests covering the safety layer, value serialization, read-only enforcement and timeouts, HTTP authentication and token groups, inspector, explain, index suggestions, schema health, migration validation, error reporting, and the tool wrappers. Each uses a temporary SQLite database, so the suite needs no credentials and no running server.
+336 tests covering the safety layer, serialization, read-only enforcement and timeouts, HTTP auth and token groups, every tool, and error reporting. Each uses a temporary SQLite database, so the suite needs no credentials and no running server.
 
-SQLite cannot produce the types that break a real driver -- it has no `NUMERIC` and returns `str`/`int` for nearly everything -- so [tests/test_serialization.py](tests/test_serialization.py) exercises `Decimal`, `datetime`, `UUID`, and binary values directly rather than through a query. [tests/test_live_databases.py](tests/test_live_databases.py) covers what SQLite cannot: the read-only transaction, the server-side statement timeout, `NUMERIC`/`TIMESTAMP` values, and catalog reflection, against real PostgreSQL and MySQL. Set `TEST_POSTGRES_URL` and/or `TEST_MYSQL_URL` (a throwaway database: the tests create and drop `dbx_live_*` tables) to run it; unset, it is skipped. CI runs both against service containers.
+[tests/test_live_databases.py](tests/test_live_databases.py) covers what SQLite cannot — the read-only transaction, the statement timeout, `NUMERIC`/`TIMESTAMP` values, catalog reflection — against real PostgreSQL and MySQL. Set `TEST_POSTGRES_URL` and/or `TEST_MYSQL_URL` to a throwaway database to run it (it creates and drops `dbx_live_*` tables). CI runs both.
+
+## Agent evals
+
+The tests check each tool; the evals check whether a model uses the tools well. [evals/run.py](evals/run.py) runs each task in [evals/scenarios.py](evals/scenarios.py) through Claude Code in headless mode (`claude -p`), with this server as its only tool source, against a seeded `evals/eval.db`. Each run is scored on tool choice, call budget and a correct answer read from the database, and a second `claude -p` call grades the whole run from 1 to 5.
+
+```powershell
+uv run python evals/seed_eval_db.py      # build evals/eval.db (the runner does this if it is missing)
+uv run python evals/run.py               # every scenario, on Sonnet
+uv run python evals/run.py --only top_customers --model opus
+```
+
+It needs the `claude` CLI on `PATH`, logged in; runs count toward that login's usage limits, and no API key is involved. Results vary between runs, so the evals are not part of CI. Reports are written to `evals/results/`.
+
+### Latest results
+
+Claude Sonnet 5.5 as agent and judge, 2026-10-14. Full report, including every tool call and its result: [evals/reports/2026-10-14-sonnet.json](evals/reports/2026-10-14-sonnet.json).
+
+**14/14 passed · 0 tool errors · 0 repeated calls · 28 tool calls in total · mean judge score 4.64 / 5**
+
+| Task | Tools the agent chose | Calls / budget | Judge |
+|---|---|---|---|
+| List the tables and views | `explore_schema` | 1/3 | 5/5 |
+| Orders per status | `explore_schema`, `execute_query` | 2/4 | 5/5 |
+| Top 3 customers by delivered spend | `explore_schema`, `execute_query` | 3/5 | 4/5 |
+| Category with the most revenue | `explore_schema`, `execute_query` | 2/5 | 5/5 |
+| Category with the best average rating | `explore_schema`, `execute_query` | 2/5 | 5/5 |
+| Users who never ordered | `explore_schema`, `execute_query` | 2/4 | 5/5 |
+| 5 most recent orders with customer names | `explore_schema`, `execute_query` | 2/4 | 5/5 |
+| Row count of "the user table" (real name: `users`) | `explore_schema`, `execute_query` | 2/4 | 5/5 |
+| Why a date-filtered query is slow | `explore_schema`, `explain_query` | 2/4 | 5/5 |
+| Audit the schema for structural problems | `validate_schema`, `explore_schema` | 2/4 | 4/5 |
+| Which foreign keys on `reviews` need an index | `suggest_index`, `explore_schema` | 2/3 | 4/5 |
+| Migration adding a `phone` column | `migration_context`, `validate_migration` | 2/4 | 5/5 |
+| "Delete all cancelled orders" (must refuse: read-only) | `explore_schema`, `execute_query` | 2/5 | 4/5 |
+| Users on the pro plan | `explore_schema`, `execute_query` | 2/3 | 4/5 |
+
+Every answer that has a single right value was checked against the database, not just judged. Scores of 4 were for one call more than needed, or extra commentary beyond the question.
+
+Known limitation: `explore_schema` does not yet report UNIQUE or CHECK constraints, so in a schema audit the model can claim one is missing when it exists.
 
 ## Project layout
 
@@ -410,22 +388,17 @@ migration.py      migration context and non-executing script validation
 errors.py         coded errors with hints, and driver-error classification
 config.py         environment configuration with fail-fast checks
 tests/            pytest suite over temporary SQLite databases
+evals/            agent evals: a Claude model works scripted tasks through the tools
 ```
 
 ## Design notes and limits
 
-- **Migrations are never executed.** The server returns schema context and validates scripts; you run the DDL. That keeps the connection read-only in practice, not just by policy.
-- **Query-mode `suggest_index` flags full table scans, not missing indexes in general.** It reads the plan each dialect returns: a `SCAN` without an index on SQLite, `Seq Scan on` on PostgreSQL, access type `ALL` on MySQL. It names the scan rather than writing a `CREATE INDEX`, because which column to index depends on the query. A planner also scans a small table on purpose, so a scan on a table of a few rows is expected, not a problem. Other dialects get the plan and no recommendations.
-- **Only the default schema is inspected.** `explore_schema`, `validate_schema`, `suggest_index` and `migration_context` see the tables of one schema: on PostgreSQL the first schema on the `search_path` (usually `public`), on MySQL the database named in `DATABASE_URL`. A table in another schema, such as `billing.invoices`, is missing from every listing and reported as not found by name, though `execute_query` still reads it when the SQL names the schema. To inspect a different PostgreSQL schema instead, make it the connecting role's first schema: `ALTER ROLE explorer SET search_path = billing, public;`.
-- **The keyword denylist matches whole tokens, not substrings**, so a keyword that merely contains a blocked word is unaffected: `GROUPING SETS` and `SELECT grant_date FROM permissions` both pass, where a naive `"SET" in sql` check would reject the first and `"GRANT" in sql` the second.
-- **Each denylist entry has to earn its place.** `INTO` does: `SELECT * INTO archive FROM users` has statement type `SELECT` but creates a table, so only the keyword scan catches it. `SET` did not, and was removed — every statement that changes session state (`SET ROLE`, `SET search_path`, even `SET x = (SELECT 1)`) parses as type `UNKNOWN` and is refused by the type check, while `UPDATE ... SET` inside a data-modifying CTE is caught by `UPDATE`. All it added was rejecting `SELECT set FROM config`, since `sqlparse` types a bare `set` as a keyword rather than a column name.
-- **Four of the twelve entries are load-bearing** — `INSERT`, `UPDATE`, `DELETE` and `INTO` are reachable in a statement whose type is `SELECT`, the first three through Postgres data-modifying CTEs. The rest are redundant, because a CTE accepts only `INSERT`, `UPDATE`, `DELETE` and `MERGE`, never DDL: no legal `SELECT`-typed statement can contain `DROP`. They stay as a second line if `sqlparse` type detection ever regresses.
-- **A few read-only statements are rejected for lack of a statement type.** `sqlparse` reports `UNKNOWN` for a parenthesized `(SELECT 1)`, for `VALUES (1)` and for `TABLE users`, and the type check refuses anything that is not `SELECT`. All are harmless; none is currently accepted.
-
-  This is left as a rejection rather than fixed by unwrapping, because the incidence is near zero — a caller writes the plain `SELECT` — and widening what the parser accepts to serve a query nobody sends is a poor trade against the risk. What *was* fixed is the explanation: these reasons and a genuine write both contain `Only SELECT`, so they used to collapse to the same hint, and a caller that sent a read was told the server is read-only and pointed at `validate_migration`. `Got: UNKNOWN` now carries its own hint naming the shapes that cause it. A rejection the caller can recover from in one turn is an acceptable cost; a rejection that misdiagnoses itself is not.
-- **SQL is capped at 50,000 characters before parsing.** `sqlparse` spends about 0.9 s of CPU on 50 KB of dense SQL such as a long `IN (...)` list and about 2.7 s on 100 KB, and refuses more than 10,000 tokens in one list long before either, so the cap costs nothing a query could have used. Past either limit the call fails with `query_too_complex` rather than `internal_error`.
-- **The row cap is a context guard, not a performance guard.** A heavy aggregate still runs in full on the database before its output is limited. `QUERY_TIMEOUT_SECONDS` is what bounds the cost of that work.
-- **Long text is cut, and so is a large result.** `row_limit` bounds rows, not bytes, so one 5 MB text cell used to arrive whole. A text value over 2000 characters arrives as its first 2000 followed by `... [truncated: N characters in total]`, in `execute_query`, `explain_query` and `explore_schema` sample rows alike. `execute_query` also stops adding rows once the result passes 500,000 bytes, sets `truncated`, and says in `note` that a higher `row_limit` will not help. The first row is always kept. A page of `explore_schema` or `migration_context` is cut the same way at 500,000 bytes: it returns fewer tables than `limit`, with `has_more`, `next_offset` and a `note`, so a call with `detail=True` over a thousand wide tables arrives as several pages rather than megabytes in one. Detail is reflected 50 tables at a time, so the cut also skips the work for tables it would drop.
-- **MariaDB is not tested.** It shares the MySQL code path, but CI runs only PostgreSQL and MySQL. MariaDB's documentation says it may drop an `ORDER BY` inside a subquery that has no `LIMIT`, and every query here is wrapped in one, so on MariaDB a truncated, ordered result may not be the true top N. Add your own `LIMIT` to an ordered query there.
-- **Binary columns are summarised, not returned.** Values up to 256 bytes arrive hex-encoded, which suits `BINARY(16)` UUIDs and digests; anything larger is reported as a size only. Inlining a multi-megabyte blob would consume the context window it was sent to.
-- **Wide `NUMERIC` values arrive as strings.** A decimal that fits a float is a JSON number so it sorts and compares correctly; one that does not keeps its exact digits rather than being silently rounded.
+- **Query-mode `suggest_index` flags full table scans, not missing indexes in general.** It names the scan rather than writing a `CREATE INDEX`, because which column to index depends on the query. A scan on a tiny table is expected, not a problem.
+- **Only the default schema is inspected**: the first schema on PostgreSQL's `search_path` (usually `public`), or the database named in `DATABASE_URL` on MySQL. `execute_query` still reads `billing.invoices` when the SQL names the schema. To inspect another PostgreSQL schema, put it first: `ALTER ROLE explorer SET search_path = billing, public;`.
+- **A few read-only shapes are refused.** `sqlparse` cannot type a parenthesized `(SELECT 1)`, `VALUES (1)` or `TABLE users`, so they are rejected with a hint to write a plain `SELECT`.
+- **SQL is capped at 50,000 characters**, and past `sqlparse`'s token or nesting limits the call fails with `query_too_complex`.
+- **The row cap guards context, not cost.** A heavy aggregate still runs in full; `QUERY_TIMEOUT_SECONDS` bounds that.
+- **Long text and large results are cut.** A text value over 2000 characters arrives truncated with its full length noted. A query result stops at 500,000 bytes with `truncated` set, and a schema page stops there too and continues at `next_offset`.
+- **MariaDB is not tested.** It shares the MySQL code path, but may drop an `ORDER BY` inside the row-cap subquery; add your own `LIMIT` to an ordered query there.
+- **Binary values up to 256 bytes arrive hex-encoded**; larger ones are reported as a size only.
+- **Wide `NUMERIC` values arrive as strings**, so they keep their exact digits rather than being rounded.

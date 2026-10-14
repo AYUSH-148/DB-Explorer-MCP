@@ -382,8 +382,9 @@ def get_schema_page(
         )
     if not detail:
         result["detail_hint"] = (
-            "Call explore_schema(table_name=...) for columns, keys, indexes, "
-            "and row count."
+            "Call explore_schema(detail=true, name_pattern=...) for the columns, "
+            "keys and indexes of several tables at once, or "
+            "explore_schema(table_name=...) for one table with its row count."
         )
     return result
 

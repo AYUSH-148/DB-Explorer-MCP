@@ -89,6 +89,41 @@ def test_clients_see_instructions_annotations_and_parameter_descriptions():
         assert undescribed == [], tool.name
 
 
+@pytest.mark.parametrize(
+    ("arguments", "field"),
+    [
+        ({}, "sql: Missing required argument"),
+        ({"sql": 123}, "sql: Input should be a valid string"),
+        ({"sql": "SELECT 1", "row_limit": "abc"}, "row_limit: Input should be a valid integer"),
+        ({"sql": "SELECT 1", "bogus": 1}, "bogus: Unexpected keyword argument"),
+    ],
+)
+def test_arguments_that_break_the_schema_get_a_code_and_an_audit_line(
+    arguments, field, caplog
+):
+    # FastMCP rejects these before the tool runs, so tool_errors never sees them;
+    # through a real client they must still look like every other error.
+    async def scenario():
+        async with Client(server.mcp) as client:
+            await client.call_tool("execute_query", arguments)
+
+    with caplog.at_level(logging.INFO, logger="db_explorer.audit"):
+        with pytest.raises(ToolError) as raised:
+            asyncio.run(scenario())
+
+    message = str(raised.value)
+    assert message.startswith("[invalid_argument] ")
+    assert field in message
+    assert "Hint: " in message
+    assert "pydantic.dev" not in message
+    audit = [
+        record.getMessage()
+        for record in caplog.records
+        if record.name == "db_explorer.audit"
+    ]
+    assert audit == [f"execute_query invalid_argument {arguments!r}"]
+
+
 def test_explore_schema_tool_returns_table_detail(configured_engine, monkeypatch):
     monkeypatch.setattr(server, "engine", configured_engine)
 

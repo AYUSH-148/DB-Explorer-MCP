@@ -20,3 +20,6 @@ __pycache__/
 
 # Planning notes
 /db-explorer-mcp-blueprint.md
+
+# Eval run reports
+/evals/results/
