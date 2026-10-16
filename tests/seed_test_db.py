@@ -21,6 +21,9 @@ CREATE INDEX idx_orders_user_id ON orders(user_id);
 
 
 def create_sample_database(database_path: Path) -> None:
+    if database_path.exists():
+        database_path.unlink()
+
     engine = create_engine(f"sqlite:///{database_path}")
     with engine.begin() as connection:
         for statement in SCHEMA_SQL.split(";"):
