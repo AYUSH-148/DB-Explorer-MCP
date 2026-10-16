@@ -5,16 +5,13 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Commands
 
 ```powershell
-uv sync                                # install deps
 uv run python tests/seed_test_db.py    # (re)create sample.db
-uv run pytest                          # 336 SQLite tests; 26 live tests skip unless TEST_*_URL is set
-uv run pytest tests/test_safety.py     # run one test file
-uv run pytest tests/test_safety.py::test_name -v   # run a single test
+uv run pytest                          # live tests skip unless TEST_*_URL is set
 uv run server.py                       # start server, stdio transport
 uv run python evals/run.py             # agent evals through claude -p (uses the Claude Code login's usage)
 ```
 
-`uv run ruff check .` lints (bug-catching rules only, see `[tool.ruff.lint]` in `pyproject.toml`). CI (`.github/workflows/ci.yml`) runs ruff and pytest on every push to `main` and every PR.
+`uv run ruff check .` lints (bug-catching rules only, see `[tool.ruff.lint]` in `pyproject.toml`).
 
 To run over HTTP locally, set `MCP_TRANSPORT=streamable-http` (plus `MCP_HOST`/`MCP_PORT` and `MCP_AUTH_TOKEN` or `MCP_AUTH_TOKENS`) before `uv run server.py` — see README "Serve over HTTP".
 
@@ -29,16 +26,11 @@ This is an MCP server (`server.py`, FastMCP) exposing 7 read-only database tools
 Safety validation is layer one of three — `db.py` adds a statement timeout (`QUERY_TIMEOUT_SECONDS`, dialect-specific: `SET LOCAL statement_timeout` per transaction on Postgres, never the `options` startup parameter that PgBouncer-style poolers reject; `max_execution_time` on MySQL, progress-handler on SQLite) and runs reads inside a read-only transaction (`BEGIN READ ONLY` / `START TRANSACTION READ ONLY` / `PRAGMA query_only`) so the database itself refuses writes, independent of the parser.
 
 **Module split** (each tool in `server.py` is a thin `@mcp.tool` wrapper delegating to a plain function that takes an `Engine`, so everything is testable against a temp SQLite DB with no MCP client involved):
-- `safety.py` — the trust boundary described above
 - `db.py` — engine construction, timeouts, read-only transaction setup
 - `inspector.py` — schema reflection (columns, PK, FKs, indexes, row counts, samples, table and column comments) via SQLAlchemy `inspect()`. Every result carries the engine's `dialect`. Lists views and materialized views alongside tables, each tagged with a `kind`. Table comments are fetched in their own savepoint, so a failure there costs only the comments. A schema page (`explore_schema` listing, `migration_context`) is cut at `MAX_RESULT_BYTES` like a query result and continues at `next_offset`; detail is reflected `DETAIL_BATCH` tables at a time so the cut stops the work too
-- `explain.py` — dialect-aware `EXPLAIN` / `EXPLAIN QUERY PLAN`
-- `index_suggest.py` — index recommendations from a live plan (full-scan detection for SQLite, PostgreSQL, MySQL) or FK metadata (works on every dialect)
-- `schema_health.py` — objective schema audit (`missing_primary_key`, `unindexed_foreign_key`, `wide_table`, `no_indexes`)
 - `indexes.py` — which indexes can serve a foreign key, shared by `schema_health.py` and `index_suggest.py`. Counts the implicit PRIMARY KEY and UNIQUE indexes that `get_indexes()` omits; ignores partial, GIN/GiST/BRIN and FULLTEXT/SPATIAL indexes. Reads UNIQUE through SQLite's auto-indexes rather than `get_unique_constraints()`, which raises `NotImplementedError` on SQL Server and drops constraints whose case differs on SQLite.
 - `migration.py` — returns schema context and validates `up`/`down` SQL statement types; **never executes DDL**
 - `errors.py` — `ToolInputError` (a `ValueError` subclass) internally; converted to FastMCP `ToolError` only at the `server.py` boundary, because `ToolError` is the one error type that survives `mask_error_details=True`. Every error carries a `code` and a corrective hint.
-- `serialization.py` — driver values (Decimal, datetime, UUID, binary) to JSON-safe primitives
 - `auth.py` — named bearer tokens for HTTP transports (`MCP_AUTH_TOKENS=name:group:token,...`, or a single `MCP_AUTH_TOKEN`), compared in constant time against every entry. A match returns an `AccessToken` with `client_id=<name>` and `claims={"group": ...}`; `server.current_engine` picks the group's engine (`DATABASE_URL_<GROUP>`) from that claim, refusing a group it has no engine for with `unknown_group` rather than falling back to `DATABASE_URL`, and the audit line records `user=`/`group=`. Access control per group is the database's grants, never server-side filtering
 - `config.py` — loads `.env` (local file next to `config.py` first, then CWD `.env`; real env vars win over both), fails fast if `DATABASE_URL`/a token is missing under an HTTP transport, or a token group has no `DATABASE_URL_<GROUP>`. The stdio fallback is `sample.db` next to `config.py` (never CWD-relative), opened `mode=ro`
 
@@ -46,4 +38,4 @@ Transports (stdio vs. streamable-http) run identical tool code; only `MCP_TRANSP
 
 ## Testing notes
 
-Without `TEST_POSTGRES_URL` / `TEST_MYSQL_URL`, the 336 tests that run use a temporary SQLite database — no credentials, no running server, no network. SQLite can't produce the driver types that matter for correctness (no `NUMERIC`, returns `str`/`int` for nearly everything), so `tests/test_serialization.py` exercises `Decimal`/`datetime`/`UUID`/binary directly rather than through a query. `tests/test_live_databases.py` runs the dialect-specific paths (read-only transaction, statement timeout, NUMERIC/TIMESTAMP serialization, reflection) against real PostgreSQL and MySQL when `TEST_POSTGRES_URL` / `TEST_MYSQL_URL` are set, and skips otherwise. CI sets both via service containers. It creates and drops `dbx_live_*` tables, so only point it at a throwaway database.
+Without `TEST_POSTGRES_URL` / `TEST_MYSQL_URL`, the tests use a temporary SQLite database — no credentials, no running server, no network. SQLite can't produce the driver types that matter for correctness (no `NUMERIC`, returns `str`/`int` for nearly everything), so `tests/test_serialization.py` exercises `Decimal`/`datetime`/`UUID`/binary directly rather than through a query. `tests/test_live_databases.py` runs the dialect-specific paths (read-only transaction, statement timeout, NUMERIC/TIMESTAMP serialization, reflection) against real PostgreSQL and MySQL when `TEST_POSTGRES_URL` / `TEST_MYSQL_URL` are set, and skips otherwise. CI sets both via service containers. It creates and drops `dbx_live_*` tables, so only point it at a throwaway database.
