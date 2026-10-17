@@ -64,6 +64,137 @@ The SQL arriving at [safety.py](safety.py) is written by the client's model and 
 
 Both modes run identical tool code — only `MCP_TRANSPORT` changes.
 
+## Quickstart
+
+Requires Python 3.11+ and [uv](https://docs.astral.sh/uv/).
+
+```bash
+git clone https://github.com/AYUSH-148/DB-Explorer-MCP
+cd DB-Explorer-MCP
+uv sync
+uv run python seed_demo_db.py   # creates sample.db, a small shop with deliberate schema flaws
+uv run pytest                   # 336 tests on SQLite; 26 more with TEST_*_URL set
+```
+
+On Windows, if `uv` is not on `PATH`, prefix with `py -m` (`py -m uv sync`).
+
+You don't start the server yourself: your MCP client launches it over stdio, so go on to [Connect a client](#connect-a-client). Run by hand, `uv run server.py` prints nothing and waits for a client on stdin; stop it with Ctrl+C.
+
+The default database is `sample.db`. Point at your own with `DATABASE_URL`, either in the client config below or in a `.env` file copied from [.env.example](.env.example):
+
+```text
+postgresql+psycopg2://user:password@localhost:5432/example
+mysql+pymysql://user:password@localhost:3306/example
+sqlite:///C:/data/example.db
+```
+
+Percent-encode special characters in passwords (`@` → `%40`, `#` → `%23`, `/` → `%2F`).
+
+## Connect a client
+
+### Claude Code — local
+
+```powershell
+claude mcp add db-explorer --env DATABASE_URL="postgresql+psycopg2://user:pass@localhost:5432/example" -- uv --directory "C:/path/to/DB-Explorer-MCP" run server.py
+```
+
+Then run `/mcp` in a session to confirm the 7 tools are listed. Add `-s user` to make it available in every project.
+
+### Claude Code — remote
+
+```powershell
+claude mcp add --transport http db-explorer https://your-deployment.fastmcp.app/mcp
+```
+
+Run `/mcp` → **Authenticate** for the OAuth flow; tokens are cached and refreshed automatically.
+
+For a server you host yourself with a bearer token, send it as a header. Read it from an environment variable, so a `.mcp.json` committed for the team holds no secret:
+
+```json
+{
+  "mcpServers": {
+    "db-explorer": {
+      "type": "http",
+      "url": "https://dbx.example.com/mcp",
+      "headers": { "Authorization": "Bearer ${DBX_TOKEN}" }
+    }
+  }
+}
+```
+
+### Claude Desktop
+
+Local, in `claude_desktop_config.json`:
+
+```json
+{
+  "mcpServers": {
+    "db-explorer": {
+      "command": "uv",
+      "args": ["--directory", "C:/path/to/DB-Explorer-MCP", "run", "server.py"],
+      "env": { "DATABASE_URL": "postgresql+psycopg2://user:pass@localhost:5432/example" }
+    }
+  }
+}
+```
+
+To reach a remote deployment without a custom connector, proxy it over stdio:
+
+```json
+{
+  "mcpServers": {
+    "db-explorer": {
+      "command": "npx",
+      "args": ["-y", "mcp-remote", "https://your-deployment.fastmcp.app/mcp"]
+    }
+  }
+}
+```
+
+### VS Code
+
+[.vscode/mcp.json](.vscode/mcp.json) is checked in and starts the server over stdio through the Windows `py` launcher. On macOS or Linux, change its `command` to `uv` and its `args` to `["run", "server.py"]`.
+
+### MCP Inspector
+
+```powershell
+npx @modelcontextprotocol/inspector
+```
+
+Use transport `Streamable HTTP` with your `/mcp` URL, or stdio with `uv run server.py`. The Inspector shows raw tool responses and unparaphrased errors, which makes it the fastest way to tell a server problem from a client problem.
+
+### Python
+
+```python
+import asyncio
+from fastmcp import Client
+
+async def main():
+    async with Client("https://your-deployment.fastmcp.app/mcp", auth="oauth") as client:
+        print([tool.name for tool in await client.list_tools()])
+        print(await client.call_tool("explore_schema", {}))
+
+asyncio.run(main())
+```
+
+## Try it
+
+Once connected to the demo `sample.db` from [Quickstart](#quickstart), prompts like these work directly:
+
+- *"What tables exist, and which ones are missing primary keys?"*
+- *"Show me 5 rows from `orders` with the highest total."*
+- *"Why is this query slow? `SELECT * FROM orders WHERE created_at >= '2026-01-01'`"*
+- *"Which foreign keys in this database lack indexes? Give me the `CREATE INDEX` statements."*
+- *"Draft a migration adding a `shipped_at` column to `orders`, then validate the up and down scripts."*
+
+To watch the guardrails work, ask it to run `DELETE FROM users`. The call fails with `Unsafe query blocked: Only SELECT queries are allowed. Got: DELETE` and the database is untouched.
+
+## Agent skill
+
+[skill/db-explorer/SKILL.md](skill/db-explorer/SKILL.md) is an optional agent skill that teaches the model to use these tools well: read the schema once before querying, compute totals in SQL rather than from returned rows, say when a result is `truncated`, and follow error hints instead of retrying. It guides the model only; the server must still be connected.
+
+For Claude Code, copy the `skill/db-explorer` folder to `~/.claude/skills/db-explorer/` for every project, or to `.claude/skills/db-explorer/` inside one project.
+
 ## Tools
 
 | Tool | Arguments | Returns |
@@ -140,129 +271,8 @@ Hint: Add a WHERE clause, aggregate instead of scanning, or query a smaller tabl
 | `invalid_argument` | An argument out of range, such as `row_limit` below 1, or arguments that don't fit the tool's input schema: a missing required one, a wrong type, an unknown name |
 | `missing_argument` / `conflicting_arguments` | `suggest_index` needs exactly one of `query` or `table_name` |
 | `comments_not_allowed` / `unparsable_sql` / `select_in_migration` | `validate_migration` rejected a script |
+| `server_busy` | Every database connection was in use for `DB_POOL_TIMEOUT_SECONDS`; no query ran. Retry unchanged |
 | `internal_error` | A bug in the server. The traceback goes to the server log; the caller sees only the code |
-
-## Quickstart
-
-Requires Python 3.11+ and [uv](https://docs.astral.sh/uv/).
-
-```powershell
-uv sync
-uv run python tests/seed_test_db.py   # creates sample.db
-uv run pytest                         # 336 tests on SQLite; 26 more with TEST_*_URL set
-uv run server.py                      # stdio transport
-```
-
-If `uv` is not on `PATH`, prefix with `py -m` (`py -m uv sync`).
-
-The default database is `sqlite:///sample.db`. Point at your own with `DATABASE_URL`:
-
-```powershell
-$env:DATABASE_URL = "postgresql+psycopg2://user:password@localhost:5432/example"
-$env:DATABASE_URL = "mysql+pymysql://user:password@localhost:3306/example"
-$env:DATABASE_URL = "sqlite:///C:/data/example.db"
-```
-
-Percent-encode special characters in passwords (`@` → `%40`, `#` → `%23`, `/` → `%2F`).
-
-## Connect a client
-
-### Claude Code — local
-
-```powershell
-claude mcp add db-explorer --env DATABASE_URL="postgresql+psycopg2://user:pass@localhost:5432/example" -- uv --directory "C:/path/to/DB-Explorer-MCP" run server.py
-```
-
-Then run `/mcp` in a session to confirm the 7 tools are listed. Add `-s user` to make it available in every project.
-
-### Claude Code — remote
-
-```powershell
-claude mcp add --transport http db-explorer https://your-deployment.fastmcp.app/mcp
-```
-
-Run `/mcp` → **Authenticate** for the OAuth flow; tokens are cached and refreshed automatically.
-
-For a server you host yourself with a bearer token, send it as a header. Read it from an environment variable, so a `.mcp.json` committed for the team holds no secret:
-
-```json
-{
-  "mcpServers": {
-    "db-explorer": {
-      "type": "http",
-      "url": "https://dbx.example.com/mcp",
-      "headers": { "Authorization": "Bearer ${DBX_TOKEN}" }
-    }
-  }
-}
-```
-
-### Claude Desktop
-
-Local, in `claude_desktop_config.json`:
-
-```json
-{
-  "mcpServers": {
-    "db-explorer": {
-      "command": "uv",
-      "args": ["--directory", "C:/path/to/DB-Explorer-MCP", "run", "server.py"],
-      "env": { "DATABASE_URL": "postgresql+psycopg2://user:pass@localhost:5432/example" }
-    }
-  }
-}
-```
-
-To reach a remote deployment without a custom connector, proxy it over stdio:
-
-```json
-{
-  "mcpServers": {
-    "db-explorer": {
-      "command": "npx",
-      "args": ["-y", "mcp-remote", "https://your-deployment.fastmcp.app/mcp"]
-    }
-  }
-}
-```
-
-### VS Code
-
-[.vscode/mcp.json](.vscode/mcp.json) is checked in and starts the server over stdio — no extra setup for anyone who clones the repo.
-
-### MCP Inspector
-
-```powershell
-npx @modelcontextprotocol/inspector
-```
-
-Use transport `Streamable HTTP` with your `/mcp` URL, or stdio with `uv run server.py`. The Inspector shows raw tool responses and unparaphrased errors, which makes it the fastest way to tell a server problem from a client problem.
-
-### Python
-
-```python
-import asyncio
-from fastmcp import Client
-
-async def main():
-    async with Client("https://your-deployment.fastmcp.app/mcp", auth="oauth") as client:
-        print([tool.name for tool in await client.list_tools()])
-        print(await client.call_tool("explore_schema", {}))
-
-asyncio.run(main())
-```
-
-## Try it
-
-Once connected, prompts like these work directly:
-
-- *"What tables exist, and which ones are missing primary keys?"*
-- *"Show me 5 rows from `orders` with the highest total."*
-- *"Why is this query slow? `SELECT * FROM orders WHERE customer_id = 42`"*
-- *"Which foreign keys in this database lack indexes? Give me the `CREATE INDEX` statements."*
-- *"Draft a migration adding a `status` column to `orders`, then validate the up and down scripts."*
-
-To watch the guardrails work, ask it to run `DELETE FROM users`. The call fails with `Unsafe query blocked: Only SELECT queries are allowed. Got: DELETE` and the database is untouched.
 
 ## Configuration
 
@@ -294,6 +304,15 @@ $env:MCP_HOST = "0.0.0.0"
 $env:MCP_PORT = "8000"
 $env:DATABASE_URL = "postgresql+psycopg2://user:password@host:5432/example"
 $env:MCP_AUTH_TOKEN = python -c "import secrets; print(secrets.token_urlsafe(32))"
+uv run server.py
+```
+
+The same on macOS or Linux:
+
+```bash
+export MCP_TRANSPORT=streamable-http MCP_HOST=0.0.0.0 MCP_PORT=8000
+export DATABASE_URL="postgresql+psycopg2://user:password@host:5432/example"
+export MCP_AUTH_TOKEN="$(python3 -c 'import secrets; print(secrets.token_urlsafe(32))')"
 uv run server.py
 ```
 
@@ -387,6 +406,8 @@ indexes.py        index coverage shared by schema_health and index_suggest
 migration.py      migration context and non-executing script validation
 errors.py         coded errors with hints, and driver-error classification
 config.py         environment configuration with fail-fast checks
+seed_demo_db.py   builds the demo sample.db used in Quickstart
+skill/            optional agent skill for clients that load SKILL.md files
 tests/            pytest suite over temporary SQLite databases
 evals/            agent evals: a Claude model works scripted tasks through the tools
 ```
@@ -402,3 +423,7 @@ evals/            agent evals: a Claude model works scripted tasks through the t
 - **MariaDB is not tested.** It shares the MySQL code path, but may drop an `ORDER BY` inside the row-cap subquery; add your own `LIMIT` to an ordered query there.
 - **Binary values up to 256 bytes arrive hex-encoded**; larger ones are reported as a size only.
 - **Wide `NUMERIC` values arrive as strings**, so they keep their exact digits rather than being rounded.
+
+## License
+
+MIT. See [LICENSE](LICENSE).
