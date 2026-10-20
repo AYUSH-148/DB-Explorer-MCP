@@ -326,7 +326,7 @@ wheels = [
 ]
 
 [[package]]
-name = "db-explorer-mcp"
+name = "db-explorer-mcp-server"
 version = "0.1.0"
 source = { virtual = "." }
 dependencies = [
