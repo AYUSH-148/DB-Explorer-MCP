@@ -1,9 +1,39 @@
 [project]
 name = "db-explorer-mcp"
 version = "0.1.0"
-description = "An MCP server for safe database exploration and SQL analysis."
+description = "Read-only MCP server for PostgreSQL, MySQL, and SQLite: schema exploration, safe SELECT queries, EXPLAIN plans, index suggestions, and migration review."
 readme = "README.md"
+license = "MIT"
 requires-python = ">=3.11"
+keywords = [
+    "mcp",
+    "mcp-server",
+    "model-context-protocol",
+    "fastmcp",
+    "sql",
+    "database",
+    "postgresql",
+    "mysql",
+    "sqlite",
+    "sqlalchemy",
+    "read-only",
+    "text-to-sql",
+    "llm",
+    "ai-agents",
+    "claude",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Database",
+    "Topic :: Database :: Front-Ends",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
 dependencies = [
     "fastmcp>=3.4.7",
     "mcp>=1.29.0",
@@ -14,6 +44,11 @@ dependencies = [
     "sqlalchemy>=2.0.0",
     "sqlparse>=0.5.0",
 ]
+
+[project.urls]
+Homepage = "https://github.com/AYUSH-148/DB-Explorer-MCP"
+Repository = "https://github.com/AYUSH-148/DB-Explorer-MCP"
+Issues = "https://github.com/AYUSH-148/DB-Explorer-MCP/issues"
 
 [dependency-groups]
 dev = [
