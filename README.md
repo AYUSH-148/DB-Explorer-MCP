@@ -5,6 +5,8 @@
 
 A read-only [Model Context Protocol](https://modelcontextprotocol.io) (MCP) server for PostgreSQL, MySQL, and SQLite that lets an AI coding assistant explore, query, and audit a relational database **without ever being able to write to it**.
 
+<!-- mcp-name: io.github.AYUSH-148/db-explorer-mcp-server -->
+
 Point your MCP client at a database and ask questions in plain language. The client's LLM writes the SQL; this server parses it, refuses anything that is not a single read-only `SELECT`, executes it with a row cap, and returns structured results. Schema inspection, execution plans, index recommendations, and migration review come along with it.
 
 ```text
@@ -67,6 +69,18 @@ Both modes run identical tool code — only `MCP_TRANSPORT` changes.
 ## Quickstart
 
 Requires Python 3.11+ and [uv](https://docs.astral.sh/uv/).
+
+### From PyPI
+
+No clone needed. `uvx` downloads the package and runs it in its own environment:
+
+```bash
+claude mcp add db-explorer --env DATABASE_URL="postgresql+psycopg2://user:pass@localhost:5432/example" -- uvx db-explorer-mcp-server
+```
+
+Leave out `--env` to try it against the bundled demo database first. In any other client's config, use `"command": "uvx"` and `"args": ["db-explorer-mcp-server"]`.
+
+### From source
 
 ```bash
 git clone https://github.com/AYUSH-148/DB-Explorer-MCP

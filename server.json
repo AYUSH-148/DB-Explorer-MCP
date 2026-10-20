@@ -1,0 +1,30 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.AYUSH-148/db-explorer-mcp-server",
+  "title": "DB Explorer",
+  "description": "Read-only SQL for PostgreSQL, MySQL and SQLite: schema, safe SELECTs, EXPLAIN, index advice",
+  "repository": {
+    "url": "https://github.com/AYUSH-148/DB-Explorer-MCP",
+    "source": "github"
+  },
+  "version": "0.1.0",
+  "packages": [
+    {
+      "registryType": "pypi",
+      "identifier": "db-explorer-mcp-server",
+      "version": "0.1.0",
+      "transport": {
+        "type": "stdio"
+      },
+      "environmentVariables": [
+        {
+          "name": "DATABASE_URL",
+          "description": "SQLAlchemy URL of the database to explore. Unset opens the bundled demo database.",
+          "placeholder": "postgresql+psycopg2://user:password@localhost:5432/example",
+          "isRequired": false,
+          "isSecret": true
+        }
+      ]
+    }
+  ]
+}
