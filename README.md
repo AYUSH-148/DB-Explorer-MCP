@@ -2,6 +2,7 @@
 
 [![CI](https://github.com/AYUSH-148/DB-Explorer-MCP/actions/workflows/ci.yml/badge.svg)](https://github.com/AYUSH-148/DB-Explorer-MCP/actions/workflows/ci.yml)
 [![M8ven Score](https://m8ven.ai/badge/mcp/ayush-148-db-explorer-mcp-1x2fhb)](https://m8ven.ai/mcp/ayush-148-db-explorer-mcp-1x2fhb)
+[![DB Explorer MCP server](https://mcprush.com/badge/db-explorer-mcp/card.svg)](https://mcprush.com/to/db-explorer-mcp?ref=badge)
 
 A read-only [Model Context Protocol](https://modelcontextprotocol.io) (MCP) server for PostgreSQL, MySQL, and SQLite that lets an AI coding assistant explore, query, and audit a relational database **without ever being able to write to it**.
 
